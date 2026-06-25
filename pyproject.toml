@@ -7,8 +7,12 @@ requires-python = ">=3.11"
 dependencies = [
     "langgraph==1.2.6",
     "pydantic==2.13.4",
+    "pyyaml==6.0.2",
     "typer==0.26.7",
 ]
+
+[project.scripts]
+maker = "makeragents.cli:app"
 
 [build-system]
 requires = ["hatchling==1.30.1"]
