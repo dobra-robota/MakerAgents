@@ -5,6 +5,8 @@ description = "Local-first community opportunity research schemas and configurat
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
+    "ddgs==9.14.4",
+    "httpx==0.28.1",
     "langgraph==1.2.6",
     "pydantic==2.13.4",
     "typer==0.26.7",
@@ -21,3 +23,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: live network tests, skipped by default",
+]
