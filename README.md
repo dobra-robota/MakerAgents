@@ -14,7 +14,16 @@ MakerAgents asks:
 
 Early development.
 
-The repository is currently being shaped around the initial product design and v0 architecture. The first implementation target is a Python CLI.
+The repository now has a `uv`-managed Python package scaffold with Pydantic schemas, environment configuration loading, and tests. The CLI workflow and agents are still planned; no research behavior is implemented yet.
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+```
+
+Tests use local fixtures only and do not require real API keys.
 
 ## Core Idea
 
