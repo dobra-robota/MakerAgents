@@ -65,10 +65,28 @@ def create_run_folder(metadata: RunMetadata, *, base_dir: Path | None = None) ->
     """
 
     root = Path.cwd() if base_dir is None else base_dir
-    run_dir = root / metadata.output_dir / metadata.run_id
-    # exist_ok=False so a same-second run_id collision fails loudly instead of
-    # silently overwriting a previous run's artifacts.
-    run_dir.mkdir(parents=True, exist_ok=False)
+    runs_root = root / metadata.output_dir
+
+    # Run IDs are only second-precision, so repeated invocations for the same
+    # city/community within one second would collide. Claim a unique folder
+    # atomically (mkdir exist_ok=False), appending -2, -3, ... on collision, so
+    # repeated runs always succeed instead of raising FileExistsError while
+    # still never overwriting a previous run's artifacts.
+    attempt = 1
+    while True:
+        run_id = metadata.run_id if attempt == 1 else f"{metadata.run_id}-{attempt}"
+        run_dir = runs_root / run_id
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            attempt += 1
+
+    if run_id != metadata.run_id:
+        # Keep the written run_id consistent with the actual folder name.
+        metadata = RunMetadata.model_validate(
+            metadata.model_dump() | {"run_id": run_id}
+        )
 
     _write_run_yaml(run_dir, metadata)
     _write_final_report(run_dir, metadata)

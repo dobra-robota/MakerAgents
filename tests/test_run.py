@@ -48,3 +48,19 @@ def test_create_run_folder_writes_artifacts(tmp_path: Path) -> None:
     assert parsed["community"] == "senior citizens"
     assert parsed["max_opportunities"] == 3
     assert parsed["timestamp"] == metadata.created_at.isoformat()
+
+
+def test_create_run_folder_suffixes_on_collision(tmp_path: Path) -> None:
+    metadata = build_run_metadata(city="Łodz", community="senior citizens")
+
+    first = create_run_folder(metadata, base_dir=tmp_path)
+    second = create_run_folder(metadata, base_dir=tmp_path)
+
+    # A same-second collision gets a numeric suffix instead of a traceback.
+    assert first == tmp_path / "runs" / metadata.run_id
+    assert second == tmp_path / "runs" / f"{metadata.run_id}-2"
+    assert first.is_dir() and second.is_dir()
+
+    # The written run_id matches the actual (suffixed) folder name.
+    parsed = yaml.safe_load((second / "run.yaml").read_text(encoding="utf-8"))
+    assert parsed["run_id"] == f"{metadata.run_id}-2"
