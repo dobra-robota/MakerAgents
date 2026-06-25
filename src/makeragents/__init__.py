@@ -1,7 +1,8 @@
 """MakerAgents package foundation."""
 
+from makeragents.cli import app
 from makeragents.config import AppConfig, load_config
-from makeragents.search import ProviderResponse, SearchClient, SearchResult
+from makeragents.run import build_run_metadata, create_run_folder, slugify
 from makeragents.schemas import (
     ClaimClassification,
     Confidence,
@@ -15,6 +16,8 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.search import ProviderResponse, SearchClient, SearchResult
+from makeragents.sources import SourceRegistry, load_registry
 
 __all__ = [
     "AppConfig",
@@ -30,9 +33,15 @@ __all__ = [
     "ScoreSet",
     "SearchClient",
     "SearchResult",
+    "SourceRegistry",
     "SourceType",
     "Verdict",
+    "app",
+    "build_run_metadata",
+    "create_run_folder",
     "load_config",
+    "load_registry",
+    "slugify",
 ]
 
 __version__ = "0.1.0"
