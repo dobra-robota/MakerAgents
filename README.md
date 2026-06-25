@@ -14,7 +14,7 @@ MakerAgents asks:
 
 Early development.
 
-The repository now has a `uv`-managed Python package scaffold with Pydantic schemas, environment configuration loading, and tests. The CLI workflow and agents are still planned; no research behavior is implemented yet.
+The repository now has a `uv`-managed Python package scaffold with Pydantic schemas, environment configuration loading, and tests. The CLI workflow and agents are still planned; no research behavior is implemented yet. Detailed v0 requirements remain in `PRD.md`.
 
 ## Development
 

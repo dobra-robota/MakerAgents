@@ -6,18 +6,16 @@ import os
 from collections.abc import Mapping
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from makeragents.schemas import MakerAgentsModel
 
 
-class AppConfig(BaseModel):
+class AppConfig(MakerAgentsModel):
     """Application configuration loaded from process environment variables."""
-
-    model_config = ConfigDict(extra="forbid")
 
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
     default_llm_provider: str = "openai"
-    default_llm_model: str = ""
+    default_llm_model: str | None = None
     deepseek_model: str = "deepseek-chat"
     brave_search_api_key: str | None = None
 
@@ -30,7 +28,7 @@ class AppConfig(BaseModel):
             openai_api_key=_blank_to_none(source.get("OPENAI_API_KEY")),
             deepseek_api_key=_blank_to_none(source.get("DEEPSEEK_API_KEY")),
             default_llm_provider=source.get("DEFAULT_LLM_PROVIDER", "openai"),
-            default_llm_model=source.get("DEFAULT_LLM_MODEL", ""),
+            default_llm_model=_blank_to_none(source.get("DEFAULT_LLM_MODEL")),
             deepseek_model=source.get("DEEPSEEK_MODEL", "deepseek-chat"),
             brave_search_api_key=_blank_to_none(source.get("BRAVE_SEARCH_API_KEY")),
         )
@@ -43,6 +41,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
 
 
 def _blank_to_none(value: str | None) -> str | None:
-    if value is None or value == "":
+    if value is None:
         return None
-    return value
+    stripped = value.strip()
+    if stripped == "":
+        return None
+    return stripped

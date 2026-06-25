@@ -31,6 +31,7 @@ This repository contains a `uv`-managed Python package scaffold under `src/maker
 Important files:
 
 - `README.md` — product vision, planned workflow, agent roles, verdicts, scoring, output structure, development commands, and design principles.
+- `PRD.md` — detailed v0 requirements, CLI commands, storage layout, testing requirements, safety boundaries, and acceptance criteria.
 - `pyproject.toml` / `uv.lock` — uv-managed Python project metadata and pinned dependency lockfile.
 - `src/makeragents/schemas.py` — Pydantic models and enums for run metadata, evidence, opportunities, scores, POC types, and verdicts.
 - `src/makeragents/config.py` — environment-backed configuration loading.
@@ -50,7 +51,7 @@ Research Agent
             → Report Agent
 ```
 
-Planned local output structure is `runs/<run-id>/` with `run.yaml`, `final-report.md`, `sources/`, `evidence/`, `opportunities/<slug>/`, and `appendix/` files as described in `README.md`.
+Planned local output structure is `runs/<run-id>/` with `run.yaml`, `final-report.md`, `sources/`, `evidence/`, `opportunities/<slug>/`, and `appendix/` files as described in `PRD.md` and summarized in `README.md`.
 
 ## Essential Commands
 
@@ -77,7 +78,7 @@ grep -RInE "TODO|FIXME|HACK|don't|never|always" --exclude-dir=.git --exclude-dir
 
 ## Patterns and Workflows
 
-- Follow `README.md` and issue requirements before adding code. If implementation decisions conflict with documented product scope, stop and ask before changing scope.
+- Follow `README.md`, `PRD.md`, and issue requirements before adding code. If implementation decisions conflict with documented product scope, stop and ask before changing scope.
 - Keep v0 local-first: write auditable files under `runs/<run-id>/`; do not add a database, scheduler, auth, web dashboard, or Docker unless the product scope changes explicitly.
 - Use strict schemas for agent inputs/outputs. Planned schema work should use Pydantic and should preserve evidence IDs and confidence levels.
 - Preserve the run boundary: one run is one city plus one community. The system discovers domains from research.
@@ -123,4 +124,4 @@ Pull request descriptions should include:
 - Summary of what changed and why.
 - Validation performed, including exact commands and results.
 - Any safety, privacy, or Do No Harm implications.
-- Any scope changes from `README.md`, issue requirements, or follow-up TODOs.
+- Any scope changes from `README.md`, `PRD.md`, issue requirements, or follow-up TODOs.
