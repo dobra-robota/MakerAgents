@@ -16,6 +16,7 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.search import ProviderResponse, SearchClient, SearchResult
 from makeragents.sources import SourceRegistry, load_registry
 
 __all__ = [
@@ -27,8 +28,11 @@ __all__ = [
     "Opportunity",
     "OpportunityType",
     "POCType",
+    "ProviderResponse",
     "RunMetadata",
     "ScoreSet",
+    "SearchClient",
+    "SearchResult",
     "SourceRegistry",
     "SourceType",
     "Verdict",
