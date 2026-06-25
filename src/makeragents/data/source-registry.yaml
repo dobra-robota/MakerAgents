@@ -1,0 +1,26 @@
+# Source trust registry for MakerAgents.
+#
+# Trust scores range from 0 (untrusted) to 100 (highly trusted).
+#
+# - `default_unknown_domain_score` is used when a domain is not listed in
+#   `domains` and no usable source type is supplied.
+# - `source_type_defaults` maps each known source type to a baseline score.
+# - `domains` (optional) maps specific domains to an explicit score, which
+#   overrides the source-type default for that domain.
+#
+# Users may edit any of these values by hand.
+
+default_unknown_domain_score: 40
+
+source_type_defaults:
+  government: 85
+  academic: 80
+  major_news: 70
+  local_news: 60
+  ngo: 60
+  company_official: 55
+  forum: 40
+  reddit: 35
+  anonymous_social: 20
+
+domains: {}

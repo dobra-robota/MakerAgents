@@ -16,6 +16,7 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.sources import SourceRegistry, load_registry
 
 __all__ = [
     "AppConfig",
@@ -28,12 +29,14 @@ __all__ = [
     "POCType",
     "RunMetadata",
     "ScoreSet",
+    "SourceRegistry",
     "SourceType",
     "Verdict",
     "app",
     "build_run_metadata",
     "create_run_folder",
     "load_config",
+    "load_registry",
     "slugify",
 ]
 
