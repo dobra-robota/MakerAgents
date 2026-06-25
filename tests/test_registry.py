@@ -49,6 +49,27 @@ def test_score_for_domain_falls_back_to_type_then_default() -> None:
     assert registry.score_for_domain("unlisted.example") == 40
 
 
+def test_domain_keys_are_normalized_on_construction() -> None:
+    registry = SourceRegistry(domains={"WWW.Example.GOV": 90})
+
+    # The stored key is normalized so lookups (which also normalize) match.
+    assert registry.domains == {"example.gov": 90}
+    assert registry.score_for_domain("example.gov") == 90
+    assert registry.score_for_domain("https://WWW.Example.GOV/path") == 90
+
+
+def test_domain_keys_are_normalized_on_load(tmp_path: Path) -> None:
+    custom = tmp_path / "source-registry.yaml"
+    custom.write_text(
+        yaml.safe_dump({"domains": {"HTTPS://WWW.Trusted.Example/path": 88}}),
+        encoding="utf-8",
+    )
+
+    registry = load_registry(custom)
+
+    assert registry.score_for_domain("trusted.example") == 88
+
+
 def test_load_registry_from_user_file(tmp_path: Path) -> None:
     custom = tmp_path / "source-registry.yaml"
     custom.write_text(

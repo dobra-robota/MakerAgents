@@ -6,7 +6,7 @@ from importlib import resources
 from pathlib import Path
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from makeragents.schemas import MakerAgentsModel, ScoreValue, SourceType
 
@@ -39,6 +39,20 @@ class SourceRegistry(MakerAgentsModel):
         default_factory=_default_source_type_defaults
     )
     domains: dict[str, ScoreValue] = Field(default_factory=dict)
+
+    @field_validator("domains", mode="after")
+    @classmethod
+    def _normalize_domain_keys(
+        cls, value: dict[str, ScoreValue]
+    ) -> dict[str, ScoreValue]:
+        """Normalize ``domains`` keys at load/construction time.
+
+        Lookups normalize the queried domain, so user-edited keys like
+        ``WWW.Example.gov`` or a pasted URL must be normalized here too,
+        otherwise they would never match and silently fall back.
+        """
+
+        return {_normalize_domain(key): score for key, score in value.items()}
 
     def score_for_type(self, source_type: SourceType | str) -> float:
         """Resolve a trust score from a source type alone.
