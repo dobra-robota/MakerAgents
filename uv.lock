@@ -348,6 +348,7 @@ source = { editable = "." }
 dependencies = [
     { name = "langgraph" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "typer" },
 ]
 
@@ -360,6 +361,7 @@ dev = [
 requires-dist = [
     { name = "langgraph", specifier = "==1.2.6" },
     { name = "pydantic", specifier = "==2.13.4" },
+    { name = "pyyaml", specifier = "==6.0.3" },
     { name = "typer", specifier = "==0.26.7" },
 ]
 

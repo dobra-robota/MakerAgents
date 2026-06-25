@@ -14,6 +14,7 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.sources import SourceRegistry, load_registry
 
 __all__ = [
     "AppConfig",
@@ -26,9 +27,11 @@ __all__ = [
     "POCType",
     "RunMetadata",
     "ScoreSet",
+    "SourceRegistry",
     "SourceType",
     "Verdict",
     "load_config",
+    "load_registry",
 ]
 
 __version__ = "0.1.0"
