@@ -10,8 +10,8 @@ import yaml
 
 from makeragents.schemas import RunMetadata
 
-_RUN_YAML_FILENAME = "run.yaml"
-_FINAL_REPORT_FILENAME = "final-report.md"
+RUN_YAML_FILENAME = "run.yaml"
+FINAL_REPORT_FILENAME = "final-report.md"
 _TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 _SLUG_FALLBACK = "run"
 
@@ -101,7 +101,7 @@ def _write_run_yaml(run_dir: Path, metadata: RunMetadata) -> None:
         "timestamp": metadata.created_at.isoformat(),
         "max_opportunities": metadata.max_opportunities,
     }
-    (run_dir / _RUN_YAML_FILENAME).write_text(
+    (run_dir / RUN_YAML_FILENAME).write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -116,4 +116,4 @@ def _write_final_report(run_dir: Path, metadata: RunMetadata) -> None:
         "_This is a stub report produced by the walking skeleton. "
         "No research has been performed yet._\n"
     )
-    (run_dir / _FINAL_REPORT_FILENAME).write_text(report, encoding="utf-8")
+    (run_dir / FINAL_REPORT_FILENAME).write_text(report, encoding="utf-8")
