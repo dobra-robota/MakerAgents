@@ -393,3 +393,393 @@ def _make_ev(
         recency="unknown",
         confidence=Confidence.LOW,
     )
+
+
+# ------------------------------------------------------------------
+# LLM-backed tests (mocked, no live calls)
+# ------------------------------------------------------------------
+
+import json
+
+import httpx
+
+from makeragents.config import AppConfig
+from makeragents.llm import ChatMessage, LLMClient
+
+
+# --- Mock helpers ---
+
+_LLM_JSON_RESPONSE = {
+    "opportunities": [
+        {
+            "id": "OPP-LLM-001",
+            "title": "Better senior transport information",
+            "type": "public_guide",
+            "pain_summary": "Seniors struggle to find accessible transport options in Lodz.",
+            "who_benefits": ["senior citizens", "family caregivers"],
+            "vulnerable_groups": ["senior citizens", "people with disabilities"],
+            "evidence_ids": ["EV-001", "EV-003"],
+            "speculative": False,
+        },
+        {
+            "id": "OPP-LLM-002",
+            "title": "Reduce clinic wait times",
+            "type": "advocacy_report",
+            "pain_summary": "Long wait times at public clinics affect patient health.",
+            "who_benefits": ["patients", "healthcare workers"],
+            "vulnerable_groups": ["low-income households"],
+            "evidence_ids": ["EV-002"],
+            "speculative": True,
+        },
+    ]
+}
+
+
+def _mock_llm_response(
+    payload: dict | None = None,
+) -> tuple[LLMClient, httpx.MockTransport]:
+    """Build an LLMClient backed by a mock HTTP transport."""
+    payload = payload if payload is not None else _LLM_JSON_RESPONSE
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(payload),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "model": "deepseek-chat",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    cfg = AppConfig(deepseek_api_key="test-key")
+    llm = LLMClient(config=cfg, http_client=client)
+    return llm, transport
+
+
+def _mock_error_client() -> LLMClient:
+    """Build an LLMClient that always returns HTTP 500."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"Internal Server Error")
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    cfg = AppConfig(deepseek_api_key="test-key")
+    return LLMClient(config=cfg, http_client=client)
+
+
+class TestLLMOpportunityAgent:
+    """Integration-style tests with a mocked LLM backend."""
+
+    def test_llm_derives_opportunities(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """LLM-backed path produces candidate opportunities with beneficiaries and type."""
+        llm, _transport = _mock_llm_response()
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        assert len(opportunities) >= 1
+        for opp in opportunities:
+            assert opp.id.startswith("OPP-")
+            assert opp.title
+            assert opp.pain_summary
+            assert len(opp.who_benefits) >= 1
+            assert isinstance(opp.type, OpportunityType)
+
+    def test_llm_opportunities_have_speculative_flag(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """LLM opportunities respect the speculative flag from LLM output."""
+        llm, _transport = _mock_llm_response()
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        # At least one opportunity should be speculative (only 1 evidence ID).
+        speculative_opps = [o for o in opportunities if o.speculative]
+        assert len(speculative_opps) >= 1
+
+    def test_llm_single_evidence_becomes_speculative(
+        self, gov_evidence: EvidenceItem, tmp_path: Path
+    ) -> None:
+        """Opportunity backed by <2 evidence IDs is forced speculative."""
+        single_source_payload = {
+            "opportunities": [
+                {
+                    "id": "OPP-LLM-001",
+                    "title": "Single-source opportunity",
+                    "type": "public_guide",
+                    "pain_summary": "Derived from one evidence item.",
+                    "who_benefits": ["residents"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-001"],
+                    "speculative": False,
+                }
+            ]
+        }
+        llm, _transport = _mock_llm_response(single_source_payload)
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process([gov_evidence], tmp_path)
+
+        assert len(opportunities) == 1
+        assert opportunities[0].speculative is True
+        assert "unknown — speculative opportunity" in opportunities[0].vulnerable_groups
+
+    def test_llm_enforces_max_opportunities(
+        self, tmp_path: Path
+    ) -> None:
+        """LLM path respects max_opportunities limit."""
+        many_opps_payload = {
+            "opportunities": [
+                {
+                    "id": f"OPP-LLM-{i:03d}",
+                    "title": f"Opportunity {i}",
+                    "type": "public_guide",
+                    "pain_summary": f"Pain point {i}.",
+                    "who_benefits": ["residents"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-A", "EV-B"],
+                    "speculative": False,
+                }
+                for i in range(1, 8)
+            ]
+        }
+        llm, _transport = _mock_llm_response(many_opps_payload)
+        agent = OpportunityAgent(
+            max_opportunities=3,
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        items = [
+            _make_ev("EV-A", "Alpha.", "alpha.com"),
+            _make_ev("EV-B", "Beta.", "beta.com"),
+        ]
+        opportunities = agent.process(items, tmp_path)
+        assert len(opportunities) == 3
+
+    def test_llm_writes_opportunity_yaml(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """LLM-backed opportunities are persisted as YAML on disk."""
+        llm, _transport = _mock_llm_response()
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        agent.process(varied_evidence, tmp_path)
+
+        opp_dir = tmp_path / "opportunities"
+        assert opp_dir.is_dir()
+        yaml_files = list(opp_dir.rglob("opportunity.yaml"))
+        assert len(yaml_files) >= 1
+
+        for yf in yaml_files:
+            parsed = yaml.safe_load(yf.read_text(encoding="utf-8"))
+            assert "id" in parsed
+            assert "title" in parsed
+            assert "type" in parsed
+            assert "who_benefits" in parsed
+            assert "speculative" in parsed
+
+    def test_llm_fallback_to_heuristic_when_no_client(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """When no LLM client is provided, agent falls back to heuristic path."""
+        agent = OpportunityAgent(
+            max_opportunities=3,
+            # No llm_client passed — should fall back
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        # Heuristic path groups by domain → 3 opportunities from 3 domains.
+        assert len(opportunities) >= 1
+        for opp in opportunities:
+            assert opp.id.startswith("OPP-")
+
+    def test_llm_fallback_on_api_error(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """LLM errors trigger graceful fallback to heuristic."""
+        llm = _mock_error_client()
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        # Should fall back to heuristic clustering (≥1 opportunity).
+        assert len(opportunities) >= 1
+        for opp in opportunities:
+            assert opp.id.startswith("OPP-")
+
+    def test_llm_fallback_on_empty_response(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """Empty LLM opportunities list triggers fallback."""
+        llm, _transport = _mock_llm_response({"opportunities": []})
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        assert len(opportunities) >= 1
+        for opp in opportunities:
+            assert opp.id.startswith("OPP-")
+
+    def test_llm_missing_opportunities_key(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """Response without 'opportunities' key triggers fallback."""
+        llm, _transport = _mock_llm_response({"unrelated": 42})
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        assert len(opportunities) >= 1
+        for opp in opportunities:
+            assert opp.id.startswith("OPP-")
+
+    def test_llm_opportunity_with_unrecognised_type_is_skipped(
+        self, varied_evidence: list[EvidenceItem], tmp_path: Path
+    ) -> None:
+        """Bad opportunity type from LLM is silently skipped."""
+        bad_type_payload = {
+            "opportunities": [
+                {
+                    "id": "OPP-BAD",
+                    "title": "Bad type opp",
+                    "type": "nonexistent_type_xyz",
+                    "pain_summary": "Should be skipped.",
+                    "who_benefits": ["nobody"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-001"],
+                    "speculative": True,
+                },
+                {
+                    "id": "OPP-GOOD",
+                    "title": "Good opp",
+                    "type": "public_guide",
+                    "pain_summary": "Should be kept.",
+                    "who_benefits": ["residents"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-001", "EV-002"],
+                    "speculative": False,
+                },
+            ]
+        }
+        llm, _transport = _mock_llm_response(bad_type_payload)
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(varied_evidence, tmp_path)
+
+        # Only the valid one should be included.
+        assert len(opportunities) == 1
+        assert opportunities[0].title == "Good opp"
+
+    def test_llm_invalid_evidence_ids_filtered(
+        self, gov_evidence: EvidenceItem, tmp_path: Path
+    ) -> None:
+        """LLM-referenced evidence IDs that don't match input are dropped."""
+        payload = {
+            "opportunities": [
+                {
+                    "id": "OPP-LLM-001",
+                    "title": "Test opp",
+                    "type": "public_guide",
+                    "pain_summary": "Testing evidence ID filtering.",
+                    "who_benefits": ["residents"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-FAKE", "EV-001"],
+                    "speculative": False,
+                }
+            ]
+        }
+        llm, _transport = _mock_llm_response(payload)
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process([gov_evidence], tmp_path)
+
+        assert len(opportunities) == 1
+        # Only EV-001 should survive.
+        assert opportunities[0].evidence_ids == ["EV-001"]
+        # Single valid evidence → speculative.
+        assert opportunities[0].speculative is True
+
+    def test_llm_fuzzy_type_mapping(
+        self, gov_evidence: EvidenceItem, same_domain_evidence: EvidenceItem, tmp_path: Path
+    ) -> None:
+        """Fuzzy type names from LLM are mapped to correct OpportunityType."""
+        payload = {
+            "opportunities": [
+                {
+                    "id": "OPP-LLM-001",
+                    "title": "Open data opp",
+                    "type": "open data",
+                    "pain_summary": "Data should be open.",
+                    "who_benefits": ["citizens"],
+                    "vulnerable_groups": [],
+                    "evidence_ids": ["EV-001", "EV-004"],
+                    "speculative": False,
+                }
+            ]
+        }
+        llm, _transport = _mock_llm_response(payload)
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process(
+            [gov_evidence, same_domain_evidence], tmp_path
+        )
+
+        assert len(opportunities) == 1
+        assert opportunities[0].type is OpportunityType.OPEN_DATA_RESOURCE
+
+    def test_llm_empty_evidence_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty evidence list returns [] even with LLM client."""
+        llm, _transport = _mock_llm_response()
+        agent = OpportunityAgent(
+            llm_client=llm,
+            city="Lodz",
+            community="senior citizens",
+        )
+        opportunities = agent.process([], tmp_path)
+        assert opportunities == []
