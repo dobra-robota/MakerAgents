@@ -2,6 +2,14 @@
 
 from makeragents.cli import app
 from makeragents.config import AppConfig, load_config
+from makeragents.retry import (
+    PIPELINE_STEPS,
+    get_incomplete_steps,
+    mark_steps_complete,
+    read_opportunity_state,
+    read_status,
+    write_status,
+)
 from makeragents.run import build_run_metadata, create_run_folder, slugify
 from makeragents.schemas import (
     ClaimClassification,
@@ -42,9 +50,14 @@ __all__ = [
     "compute_low_harm_score",
     "compute_rank_score",
     "create_run_folder",
+    "get_incomplete_steps",
     "load_config",
     "load_registry",
+    "mark_steps_complete",
+    "read_opportunity_state",
+    "read_status",
     "slugify",
+    "write_status",
 ]
 
 __version__ = "0.1.0"
