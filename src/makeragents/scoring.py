@@ -8,7 +8,7 @@ the same numeric inputs.
 
 from __future__ import annotations
 
-# ── weight constants (per PRD §Ranking formula) ──────────────────────────
+# ── weight constants (per PRD §11 / Ranking formula) ─────────────────────
 _W_PEOPLE_HELPED = 0.22
 _W_SEVERITY = 0.20
 _W_VALIDITY = 0.18
@@ -16,8 +16,8 @@ _W_INTERVENTION_EASE = 0.14
 _W_LOW_HARM = 0.14
 _W_ABILITY_TO_ACT = 0.12
 
-# Ensure the weights sum to 1.0 exactly (floating-point equality is safe
-# here because these are short, terminating decimal fractions).
+# Guard that weights sum to 1.0 (floating-point equality is safe here
+# because these are short, terminating decimal fractions).
 _sum_weights = sum(
     [
         _W_PEOPLE_HELPED,
@@ -46,9 +46,9 @@ def compute_low_harm_score(*, harm_risk_score: float) -> float:
         harm_risk_score: Harm risk component score in range [0.0, 100.0].
 
     Returns:
-        float: Low-harm score in range [0.0, 100.0].
+        float: Low-harm score in range [0.0, 100.0], rounded to 2 decimal places.
     """
-    return 100.0 - harm_risk_score
+    return round(100.0 - harm_risk_score, 2)
 
 
 def compute_rank_score(
@@ -85,10 +85,8 @@ def compute_rank_score(
         harm_risk_score: Component score in range [0.0, 100.0].
         ability_to_act_score: Component score in range [0.0, 100.0].
 
-    Returns
-    -------
-    float
-        Rank score rounded to 2 decimal places.
+    Returns:
+        float: Rank score rounded to 2 decimal places.
     """
     low_harm = compute_low_harm_score(harm_risk_score=harm_risk_score)
 

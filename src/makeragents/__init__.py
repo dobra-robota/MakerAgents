@@ -1,5 +1,6 @@
 """MakerAgents package foundation."""
 
+from makeragents.agents.report import ReportAgent
 from makeragents.cli import app
 from makeragents.config import AppConfig, load_config
 from makeragents.retry import (
@@ -38,6 +39,7 @@ __all__ = [
     "OpportunityType",
     "POCType",
     "ProviderResponse",
+    "ReportAgent",
     "RunMetadata",
     "ScoreSet",
     "SearchClient",
