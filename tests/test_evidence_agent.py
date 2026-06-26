@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,9 +16,11 @@ from makeragents.agents.evidence import (
     _classify_source_type,
     _estimate_confidence,
     _extract_domain,
+    _extract_recency_from_snippet,
     _jaccard_similarity,
     _normalize_snippet,
 )
+from makeragents.llm.client import ChatMessage, LLMClientError
 from makeragents.schemas import (
     ClaimClassification,
     Confidence,
@@ -400,3 +403,334 @@ class TestConflictResult:
         cr = ConflictResult()
         assert not cr.has_conflict
         assert cr.model_dump(mode="json")["has_conflict"] is False
+
+
+# ---------------------------------------------------------------------------
+# Recency extraction tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractRecencyFromSnippet:
+    def test_iso_date(self) -> None:
+        assert (
+            _extract_recency_from_snippet("Report published 2024-03-15 shows trends")
+            == "2024-03-15"
+        )
+
+    def test_named_month(self) -> None:
+        result = _extract_recency_from_snippet(
+            "On 15 March 2024 the ministry announced..."
+        )
+        assert "march" in result.lower()
+        assert "2024" in result
+
+    def test_relative_days_ago(self) -> None:
+        assert (
+            _extract_recency_from_snippet("This was reported 3 days ago by local news")
+            == "3 days ago"
+        )
+
+    def test_last_month(self) -> None:
+        assert (
+            _extract_recency_from_snippet("Last month the council voted on...")
+            == "last month"
+        )
+
+    def test_yesterday(self) -> None:
+        assert (
+            _extract_recency_from_snippet("Yesterday I experienced delays")
+            == "yesterday"
+        )
+
+    def test_year_only(self) -> None:
+        assert (
+            _extract_recency_from_snippet("The 2023 survey revealed problems")
+            == "2023"
+        )
+
+    def test_no_date_returns_unknown(self) -> None:
+        assert _extract_recency_from_snippet("Nothing date-like here") == "unknown"
+
+    def test_empty_snippet(self) -> None:
+        assert _extract_recency_from_snippet("") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# LLM-backed classification tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_llm_client(response: dict | None = None) -> MagicMock:
+    """Create a mock LLMClient whose ``chat_json`` returns *response*."""
+    mock = MagicMock()
+    mock.chat_json.return_value = response or {}
+    return mock
+
+
+_LLM_EVIDENCE_RESPONSE = {
+    "items": [
+        {
+            "snippet_index": 0,
+            "evidence_type": "official_statement",
+            "language": "pl",
+            "confidence": "high",
+            "recency": "2024-03-15",
+            "claim_classification": "evidence_based",
+        },
+        {
+            "snippet_index": 1,
+            "evidence_type": "complaint",
+            "language": "en",
+            "confidence": "medium",
+            "recency": "2 weeks ago",
+            "claim_classification": "inference",
+        },
+    ]
+}
+
+
+class TestEvidenceAgentLLMClassification:
+    """Tests for LLM-backed evidence classification."""
+
+    @pytest.fixture
+    def mock_llm(self) -> MagicMock:
+        return _make_mock_llm_client(_LLM_EVIDENCE_RESPONSE)
+
+    @pytest.fixture
+    def registry(self) -> SourceRegistry:
+        return SourceRegistry()
+
+    @pytest.fixture
+    def agent(
+        self, registry: SourceRegistry, mock_llm: MagicMock
+    ) -> EvidenceAgent:
+        return EvidenceAgent(registry=registry, llm_client=mock_llm)
+
+    def test_classify_batch_with_llm_returns_indexed_dict(
+        self, agent: EvidenceAgent
+    ) -> None:
+        results = [
+            _make_search_result(
+                "https://city.gov/pl/report", "Według raportu ministra..."
+            ),
+            _make_search_result(
+                "https://reddit.com/r/lodz", "I complained about the buses again"
+            ),
+        ]
+        classifications = agent._classify_batch_with_llm(
+            results, city="Łodz", community="senior citizens"
+        )
+        assert len(classifications) == 2
+        assert classifications[0]["evidence_type"] == EvidenceType.OFFICIAL_STATEMENT
+        assert classifications[0]["language"] == "pl"
+        assert classifications[0]["confidence"] == Confidence.HIGH
+        assert classifications[0]["recency"] == "2024-03-15"
+        assert classifications[0]["claim_classification"] == ClaimClassification.EVIDENCE_BASED
+
+    def test_process_with_llm_applies_classifications(
+        self, agent: EvidenceAgent
+    ) -> None:
+        results = [
+            _make_search_result(
+                "https://city.gov/pl/report", "Według raportu ministra..."
+            ),
+            _make_search_result(
+                "https://reddit.com/r/lodz", "I complained about the buses again"
+            ),
+        ]
+        items = agent.process(
+            results,
+            run_id="test-run-001",
+            city="Łodz",
+            community="senior citizens",
+        )
+        assert len(items) == 2
+        # First item: LLM says "official_statement", "pl", "high", "2024-03-15"
+        assert items[0].evidence_type == EvidenceType.OFFICIAL_STATEMENT
+        assert items[0].language == "pl"
+        assert items[0].confidence == Confidence.HIGH
+        assert items[0].recency == "2024-03-15"
+        assert items[0].claim_classification == ClaimClassification.EVIDENCE_BASED
+        # Second item: LLM says "complaint", "en", "medium", "2 weeks ago"
+        assert items[1].evidence_type == EvidenceType.COMPLAINT
+        assert items[1].language == "en"
+        assert items[1].confidence == Confidence.MEDIUM
+        assert items[1].recency == "2 weeks ago"
+
+    def test_process_without_city_community_skips_llm(
+        self, agent: EvidenceAgent
+    ) -> None:
+        """LLM is skipped when city/community not provided."""
+        results = [
+            _make_search_result(
+                "https://city.gov/report", "The ministry announced new funding"
+            ),
+        ]
+        items = agent.process(results, run_id="test-run-002")
+        # Heuristic path is used (no LLM call)
+        assert len(items) == 1
+        agent._llm.chat_json.assert_not_called()  # type: ignore[union-attr]
+
+    def test_process_empty_results_with_llm(self, agent: EvidenceAgent) -> None:
+        assert (
+            agent.process(
+                [], city="Łodz", community="senior citizens"
+            )
+            == []
+        )
+
+    def test_llm_fallback_on_error(
+        self, registry: SourceRegistry
+    ) -> None:
+        """When LLM raises, heuristic path is used instead."""
+        mock_llm = _make_mock_llm_client()
+        mock_llm.chat_json.side_effect = LLMClientError("API unavailable")
+        agent = EvidenceAgent(registry=registry, llm_client=mock_llm)
+
+        results = [
+            _make_search_result(
+                "https://city.gov/report", "The ministry announced new funding"
+            ),
+        ]
+        items = agent.process(
+            results,
+            run_id="test-run-003",
+            city="Łodz",
+            community="senior citizens",
+        )
+        # Should still produce an item via heuristics
+        assert len(items) == 1
+        assert items[0].evidence_type == EvidenceType.OFFICIAL_STATEMENT
+        # Trust score still computed mechanically
+        assert items[0].trust_score >= 80.0
+
+    def test_llm_malformed_response_handled(self, agent: EvidenceAgent) -> None:
+        """Malformed LLM JSON (missing snippet_index, bad types) is validated."""
+        mock_llm = _make_mock_llm_client({
+            "items": [
+                {"snippet_index": "not-an-int", "evidence_type": "claim"},
+                {"snippet_index": 999, "evidence_type": "claim"},
+                {"snippet_index": 0, "evidence_type": "invalid_type"},
+                {"snippet_index": 0, "confidence": 123},
+                {"snippet_index": 0, "claim_classification": "bogus"},
+            ]
+        })
+        agent = EvidenceAgent(registry=SourceRegistry(), llm_client=mock_llm)
+
+        results = [
+            _make_search_result("https://a.com/1", "Some text"),
+        ]
+        classifications = agent._classify_batch_with_llm(
+            results, city="Łodz", community="senior citizens"
+        )
+        # Only the 5th item (index 0 with bogus claim) might be accepted
+        # with defaults; the others skipped.  Let's verify it doesn't crash.
+        assert isinstance(classifications, dict)
+
+    def test_llm_response_missing_items_key(self, agent: EvidenceAgent) -> None:
+        """When LLM response has no 'items' key, returns empty dict (heuristic fallback)."""
+        mock_llm = _make_mock_llm_client({"something": "else"})
+        agent2 = EvidenceAgent(registry=SourceRegistry(), llm_client=mock_llm)
+        results = [
+            _make_search_result("https://a.com/1", "Some text"),
+        ]
+        classifications = agent2._classify_batch_with_llm(
+            results, city="Łodz", community="senior citizens"
+        )
+        assert classifications == {}
+
+    def test_llm_response_items_not_a_list(self, agent: EvidenceAgent) -> None:
+        """When LLM response 'items' is not a list, returns empty dict."""
+        mock_llm = _make_mock_llm_client({"items": "not-a-list"})
+        agent2 = EvidenceAgent(registry=SourceRegistry(), llm_client=mock_llm)
+        results = [
+            _make_search_result("https://a.com/1", "Some text"),
+        ]
+        classifications = agent2._classify_batch_with_llm(
+            results, city="Łodz", community="senior citizens"
+        )
+        assert classifications == {}
+
+    def test_process_with_llm_preserves_trust_score_and_source_type(
+        self, agent: EvidenceAgent
+    ) -> None:
+        """Trust score and source type always come from the mechanical path."""
+        results = [
+            _make_search_result(
+                "https://city.gov/pl/report", "Według raportu ministra..."
+            ),
+        ]
+        items = agent.process(
+            results,
+            run_id="test-run-001",
+            city="Łodz",
+            community="senior citizens",
+        )
+        assert items[0].source_type == SourceType.GOVERNMENT
+        assert items[0].source_domain == "city.gov"
+        assert items[0].trust_score >= 80.0
+
+    def test_process_with_llm_prompt_formatting(
+        self, agent: EvidenceAgent, mock_llm: MagicMock
+    ) -> None:
+        """Verify the prompt passed to the LLM includes city, community, snippets."""
+        results = [
+            _make_search_result("https://a.com/1", "Snippet one"),
+            _make_search_result("https://b.com/2", "Snippet two"),
+        ]
+        agent.process(
+            results,
+            run_id="test-run-001",
+            city="Łodz",
+            community="senior citizens",
+        )
+        # The LLM's chat_json was called with a ChatMessage list
+        call_args = mock_llm.chat_json.call_args
+        messages: list = call_args[0][0]
+        assert len(messages) == 1
+        assert isinstance(messages[0], ChatMessage)
+        prompt = messages[0].content
+        assert "Łodz" in prompt
+        assert "senior citizens" in prompt
+        assert "Snippet one" in prompt
+        assert "Snippet two" in prompt
+
+    def test_process_with_llm_deduplicates_after_classification(
+        self, agent: EvidenceAgent
+    ) -> None:
+        """Deduplication runs after LLM classification."""
+        results = [
+            _make_search_result("https://a.com/1", "Same snippet text here"),
+            _make_search_result("https://a.com/1", "Same snippet text here"),
+        ]
+        items = agent.process(
+            results,
+            run_id="test-dedup",
+            city="Łodz",
+            community="senior citizens",
+        )
+        # Exact URL dedup keeps only one
+        assert len(items) == 1
+
+    def test_save_evidence_with_llm_classified_items(
+        self, agent: EvidenceAgent, tmp_path: Path
+    ) -> None:
+        """save_evidence persists LLM-classified items."""
+        results = [
+            _make_search_result(
+                "https://city.gov/pl/report", "Według raportu ministra..."
+            ),
+        ]
+        items = agent.process(
+            results,
+            run_id="run-001",
+            city="Łodz",
+            community="senior citizens",
+        )
+        dest = agent.save_evidence(items, tmp_path)
+        assert dest.exists()
+        data = json.loads(dest.read_text())
+        assert len(data) == 1
+        assert data[0]["evidence_type"] == "official_statement"
+        assert data[0]["language"] == "pl"
+        assert data[0]["recency"] == "2024-03-15"
