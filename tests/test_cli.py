@@ -2,9 +2,11 @@
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
+from makeragents.config import AppConfig
 from makeragents.sources.registry import (
     RUN_REGISTRY_RELATIVE_PATH,
     SourceRegistry,
@@ -16,18 +18,49 @@ from tests.conftest import _invoke_in, app, runner
 # -- run ----------------------------------------------------------------------
 
 
-def test_run_command_creates_run_folder(tmp_path: Path) -> None:
-    result = _invoke_in(
-        tmp_path,
-        "run",
-        "--city",
-        "Łodz",
-        "--community",
-        "senior citizens",
-    )
+def _mock_config() -> AppConfig:
+    """Return a config with a fake API key for testing."""
+    return AppConfig(deepseek_api_key="test-key")
+
+
+def test_run_command_creates_run_folder_and_invokes_pipeline(
+    tmp_path: Path,
+) -> None:
+    with (
+        mock.patch(
+            "makeragents.cli.load_config", return_value=_mock_config()
+        ) as mock_load,
+        mock.patch(
+            "makeragents.cli.PipelineRunner"
+        ) as mock_runner_cls,
+    ):
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = str(
+            tmp_path / "runs" / "fake" / "final-report.md"
+        )
+        mock_runner_cls.return_value = mock_runner
+
+        result = _invoke_in(
+            tmp_path,
+            "run",
+            "--city",
+            "Łodz",
+            "--community",
+            "senior citizens",
+        )
 
     assert result.exit_code == 0, result.output
 
+    # Verify load_config was called.
+    mock_load.assert_called_once()
+
+    # Verify PipelineRunner was constructed with the config.
+    mock_runner_cls.assert_called_once_with(config=mock_load.return_value)
+
+    # Verify runner.run was called.
+    mock_runner.run.assert_called_once()
+
+    # Verify run folder was created.
     runs_root = tmp_path / "runs"
     run_dirs = list(runs_root.iterdir())
     assert len(run_dirs) == 1
@@ -42,18 +75,38 @@ def test_run_command_creates_run_folder(tmp_path: Path) -> None:
     assert "timestamp" in parsed
     assert parsed["run_id"] == run_dir.name
 
+    # Verify summary output.
+    output = result.output
+    assert "Run directory:" in output
+    assert "Final report:" in output
+    assert "Completed run for 'Łodz / senior citizens'" in output
+
 
 def test_run_command_honors_max_opportunities(tmp_path: Path) -> None:
-    result = _invoke_in(
-        tmp_path,
-        "run",
-        "--city",
-        "Berlin",
-        "--community",
-        "cyclists",
-        "--max-opportunities",
-        "8",
-    )
+    with (
+        mock.patch(
+            "makeragents.cli.load_config", return_value=_mock_config()
+        ),
+        mock.patch(
+            "makeragents.cli.PipelineRunner"
+        ) as mock_runner_cls,
+    ):
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = str(
+            tmp_path / "runs" / "fake" / "final-report.md"
+        )
+        mock_runner_cls.return_value = mock_runner
+
+        result = _invoke_in(
+            tmp_path,
+            "run",
+            "--city",
+            "Berlin",
+            "--community",
+            "cyclists",
+            "--max-opportunities",
+            "8",
+        )
 
     assert result.exit_code == 0, result.output
     run_dir = next((tmp_path / "runs").iterdir())
@@ -74,6 +127,26 @@ def test_run_command_rejects_invalid_max_opportunities(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
+
+
+def test_run_command_rejects_missing_api_key(tmp_path: Path) -> None:
+    """``maker run`` exits with an error when DEEPSEEK_API_KEY is not set."""
+    with mock.patch(
+        "makeragents.cli.load_config",
+        return_value=AppConfig(deepseek_api_key=None),
+    ):
+        result = _invoke_in(
+            tmp_path,
+            "run",
+            "--city",
+            "Berlin",
+            "--community",
+            "cyclists",
+        )
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "DEEPSEEK_API_KEY" in result.output
 
 
 # -- sources ------------------------------------------------------------------

@@ -7,6 +7,8 @@ from pathlib import Path
 import typer
 
 from makeragents.agents.report import ReportAgent
+from makeragents.config import load_config
+from makeragents.orchestrator import PipelineRunner
 from makeragents.retry import (
     PIPELINE_STEPS,
     get_incomplete_steps,
@@ -49,15 +51,37 @@ def run(
         5, min=1, help="Maximum number of opportunities to surface."
     ),
 ) -> None:
-    """Create a stubbed run folder for a city-plus-community run."""
+    """Research a city + community and produce a ranked opportunity report."""
 
+    # 1. Load config and validate required API keys.
+    config = load_config()
+    if not config.deepseek_api_key:
+        typer.echo(
+            "Error: DEEPSEEK_API_KEY is not set.  "
+            "Please set it in your environment or .mise.toml.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 2. Build metadata and create the run folder.
     metadata = build_run_metadata(
         city=city,
         community=community,
         max_opportunities=max_opportunities,
     )
     run_dir = create_run_folder(metadata)
-    typer.echo(f"Created run folder: {run_dir}")
+
+    # 3. Run the full pipeline.
+    runner = PipelineRunner(config=config)
+    final_report = runner.run(run_dir, metadata)
+
+    # 4. Echo a short summary.
+    typer.echo(f"Run directory: {run_dir}")
+    typer.echo(f"Final report:  {final_report}")
+    typer.echo(
+        f"Completed run for '{city} / {community}' "
+        f"(max opportunities: {max_opportunities})."
+    )
 
 
 # -- report -------------------------------------------------------------------
