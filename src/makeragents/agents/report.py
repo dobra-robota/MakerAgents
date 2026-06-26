@@ -8,11 +8,12 @@ LLM calls.  It is used by the ``maker report`` CLI command.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import yaml
 
-from makeragents.run import _RUN_YAML_FILENAME, _FINAL_REPORT_FILENAME  # noqa: PLC2701
+from makeragents.run import FINAL_REPORT_FILENAME, RUN_YAML_FILENAME
 from makeragents.sources.registry import RUN_REGISTRY_RELATIVE_PATH
 
 
@@ -91,7 +92,21 @@ class ReportAgent:
                     lines.append(f"- **Verdict**: {verdict}\n")
                 scores = opp.get("scores")
                 if scores:
-                    lines.append(f"- **Rank score**: {scores.get('rank_score', '?')}\n")
+                    lines.append("- **Scores**:\n")
+                    score_keys = [
+                        "validity_score",
+                        "impact_score",
+                        "maker_score",
+                        "taker_score",
+                        "intervention_ease_score",
+                        "harm_risk_score",
+                        "ability_to_act_score",
+                        "rank_score",
+                    ]
+                    for key in score_keys:
+                        val = scores.get(key)
+                        if val is not None:
+                            lines.append(f"  - `{key}`: {val}\n")
                 lines.append("\n")
         else:
             lines.append("_No opportunities surfaced._\n\n")
@@ -101,7 +116,7 @@ class ReportAgent:
     def write_report(self) -> Path:
         """Render and write ``final-report.md`` into the run folder."""
         report = self.render()
-        dest = self.run_path / _FINAL_REPORT_FILENAME
+        dest = self.run_path / FINAL_REPORT_FILENAME
         dest.write_text(report, encoding="utf-8")
         return dest
 
@@ -110,15 +125,15 @@ class ReportAgent:
     # ------------------------------------------------------------------
 
     def _read_run_yaml(self) -> dict:
-        path = self.run_path / _RUN_YAML_FILENAME
+        path = self.run_path / RUN_YAML_FILENAME
         if not path.is_file():
             return {}
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
-    def _read_registry(self) -> dict | None:
+    def _read_registry(self) -> dict:
         path = self.run_path / RUN_REGISTRY_RELATIVE_PATH
         if not path.is_file():
-            return None
+            return {}
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     def _read_evidence(self) -> list[dict]:
@@ -130,6 +145,7 @@ class ReportAgent:
             try:
                 items.append(json.loads(fpath.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):
+                logging.warning("Skipping unreadable evidence file: %s", fpath)
                 continue
         return items
 
@@ -146,5 +162,6 @@ class ReportAgent:
                 try:
                     items.append(json.loads(opp_json.read_text(encoding="utf-8")))
                 except (json.JSONDecodeError, OSError):
+                    logging.warning("Skipping unreadable opportunity file: %s", opp_json)
                     continue
         return items

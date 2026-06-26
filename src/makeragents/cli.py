@@ -67,6 +67,12 @@ def report(
     items, and opportunities) and regenerates final-report.md without
     calling any agents or search providers.
     """
+    run_dir = Path(run_path)
+    run_yaml = run_dir / "run.yaml"
+    if not run_yaml.exists():
+        typer.echo(f"Error: No run found at {run_path}", err=True)
+        raise typer.Exit(code=1)
+
     agent = ReportAgent(run_path)
     dest = agent.write_report()
     typer.echo(f"Report written: {dest}")
@@ -122,9 +128,9 @@ def sources_trust(
         registry = load_registry()
 
     registry.domains[domain] = ScoreValue(score)
-    registry.persist_to_run(run_dir)
+    save_path = registry.persist_to_run(run_dir)
     typer.echo(
-        f"Trust score for '{domain}' set to {score} in {registry.persist_to_run(run_dir)}"
+        f"Trust score set: {domain} → {score} (saved to {save_path})"
     )
 
 
@@ -146,7 +152,7 @@ def _print_registry(registry: SourceRegistry) -> None:
     typer.echo("-" * 30)
     for stype in sorted(registry.source_type_defaults, key=lambda t: t.value):
         score = registry.source_type_defaults[stype]
-        typer.echo(f"  {stype.value:<24s} {score:3.0f}")
+        typer.echo(f"  {stype.value:<24s} {score:5.1f}")
     typer.echo()
 
     if registry.domains:
@@ -154,7 +160,7 @@ def _print_registry(registry: SourceRegistry) -> None:
         typer.echo("-" * 30)
         for domain in sorted(registry.domains):
             score = registry.domains[domain]
-            typer.echo(f"  {domain:<32s} {score:3.0f}")
+            typer.echo(f"  {domain:<32s} {score:5.1f}")
         typer.echo()
     else:
         typer.echo("Per-domain overrides: (none)")

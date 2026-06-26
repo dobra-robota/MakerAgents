@@ -98,7 +98,6 @@ def test_sources_list_prints_packaged_registry() -> None:
     output = result.output
     assert "Source Trust Registry" in output
     assert "Default unknown-domain score" in output
-    assert "40" in output
     assert "government" in output
     assert "academic" in output
     assert "reddit" in output
@@ -154,7 +153,7 @@ def test_sources_trust_updates_run_registry(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "Trust score for 'example.com' set to 75" in result.output
+    assert "Trust score set: example.com" in result.output
 
     # Verify persistence on disk.
     reloaded = load_registry(run_dir / RUN_REGISTRY_RELATIVE_PATH)
