@@ -22,8 +22,8 @@ _OVERRIDE_FIELDS = frozenset({"validity_score", "ranking", "verdict", "source_tr
 #   > validity_score changed from 61 to 75.
 #   > Reason: user manually confirmed source relevance.
 _OVERRIDE_PATTERN = re.compile(
-    r"> User Override:\n"
-    r"> (validity_score|ranking|verdict|source_trust) changed from (.+?) to (.+?)\.\n"
+    r"> User Override:\r?\n"
+    r"> (validity_score|ranking|verdict|source_trust) changed from (.+?) to (.+?)\.\r?\n"
     r"> Reason: (.+)",
     re.MULTILINE,
 )
@@ -78,6 +78,7 @@ def parse_overrides(markdown_text: str, *, source: str = "") -> list[UserOverrid
             source=source,
         )
         for m in _OVERRIDE_PATTERN.finditer(markdown_text)
+        # Defense-in-depth: regex already constrains field_name, but validate anyway.
         if m.group(1) in _OVERRIDE_FIELDS
     ]
 
@@ -96,13 +97,17 @@ def apply_score_overrides(
 
     Unrecognised or unapplicable overrides are silently ignored.
     """
+    score_overrides = [o for o in overrides if o.field_name in ("validity_score", "ranking")]
+    if not score_overrides:
+        return scores  # no changes needed
+
     values: dict[str, float] = scores.model_dump()
 
     # Separate ranking overrides — they are applied last so validity
     # recalculation doesn't overwrite an explicit ranking override.
     ranking_override: float | None = None
 
-    for ov in overrides:
+    for ov in score_overrides:
         if ov.field_name == "validity_score":
             try:
                 values["validity_score"] = float(ov.new_value)
@@ -148,10 +153,10 @@ def apply_score_overrides(
 def apply_verdict_override(
     opportunity: Opportunity, overrides: list[UserOverride],
 ) -> Verdict | None:
-    """Return the user-overridden :class:`Verdict` for *opportunity*, or
-    ``None`` when no verdict override applies.
+    """Return the user-overridden :class:`Verdict` for *opportunity*.
 
-    Only the *last* ``verdict`` override in the list is used.
+    Falls back to ``opportunity.verdict`` when no valid verdict override
+    applies.  Only the *last* ``verdict`` override in the list is used.
     """
     for ov in reversed(overrides):
         if ov.field_name == "verdict":
@@ -159,7 +164,7 @@ def apply_verdict_override(
                 return Verdict(ov.new_value)
             except ValueError:
                 continue
-    return None
+    return opportunity.verdict  # fallback to original
 
 
 def apply_trust_overrides(

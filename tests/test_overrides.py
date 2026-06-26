@@ -29,7 +29,7 @@ from makeragents.schemas import (
 
 
 def _make_scores(**overrides: float) -> ScoreSet:
-    defaults: dict[str, float] = {
+    defaults: dict[str, object] = {
         "validity_score": 61,
         "maker_score": 70,
         "maker_confidence": Confidence.MEDIUM,
@@ -51,7 +51,7 @@ def _make_scores(**overrides: float) -> ScoreSet:
         harm_risk_score=defaults["harm_risk_score"],
         ability_to_act_score=defaults["ability_to_act_score"],
     )
-    defaults.update(overrides)  # type: ignore[arg-type]
+    defaults.update(overrides)
     return ScoreSet(**defaults)
 
 
@@ -170,6 +170,20 @@ class TestParseOverrides:
         assert overrides[0].new_value == "2nd place"
 
 
+    def test_parses_crlf_line_endings(self) -> None:
+        md = (
+            "> User Override:\r\n"
+            "> validity_score changed from 61 to 75.\r\n"
+            "> Reason: user manually confirmed source relevance.\r\n"
+        )
+        overrides = parse_overrides(md)
+        assert len(overrides) == 1
+        ov = overrides[0]
+        assert ov.field_name == "validity_score"
+        assert ov.old_value == "61"
+        assert ov.new_value == "75"
+        assert ov.reason == "user manually confirmed source relevance."
+
 # ---------------------------------------------------------------------------
 # apply_score_overrides
 # ---------------------------------------------------------------------------
@@ -219,6 +233,17 @@ class TestApplyScoreOverrides:
         result = apply_score_overrides(scores, overrides)
         assert result.validity_score == 85
         assert result.rank_score == 55
+
+    def test_same_field_overrides_last_wins(self) -> None:
+        """When two overrides change the same field, the last one wins."""
+        scores = _make_scores(validity_score=61)
+
+        overrides = [
+            UserOverride("validity_score", "61", "75", "first"),
+            UserOverride("validity_score", "75", "90", "last"),
+        ]
+        result = apply_score_overrides(scores, overrides)
+        assert result.validity_score == 90
 
     def test_non_numeric_override_is_ignored(self) -> None:
         scores = _make_scores(validity_score=61)
@@ -272,17 +297,17 @@ class TestApplyVerdictOverride:
         result = apply_verdict_override(opp, overrides)
         assert result == Verdict.DO_NOT_TOUCH
 
-    def test_returns_none_when_no_verdict_override(self) -> None:
-        opp = _make_opportunity()
+    def test_falls_back_to_opportunity_verdict_when_no_override(self) -> None:
+        opp = _make_opportunity(verdict=Verdict.RESEARCH_MORE)
         ov = UserOverride("validity_score", "61", "75", "score only")
         result = apply_verdict_override(opp, [ov])
-        assert result is None
+        assert result == Verdict.RESEARCH_MORE
 
-    def test_invalid_verdict_value_is_ignored(self) -> None:
+    def test_invalid_verdict_value_falls_back_to_original(self) -> None:
         opp = _make_opportunity(verdict=Verdict.RESEARCH_MORE)
         ov = UserOverride("verdict", "RESEARCH_MORE", "INVALID_VERDICT", "bad")
         result = apply_verdict_override(opp, [ov])
-        assert result is None
+        assert result == Verdict.RESEARCH_MORE
 
 
 # ---------------------------------------------------------------------------
