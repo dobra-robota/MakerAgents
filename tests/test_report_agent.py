@@ -806,7 +806,7 @@ class TestCLIReportCommand:
         result = _invoke_in(tmp_path, "report", str(run_dir))
 
         assert result.exit_code == 0, result.output
-        assert "Report generated" in result.output
+        assert "Report written" in result.output
 
     def test_report_command_creates_appendix(self, tmp_path: Path) -> None:
         run_dir = _make_run_dir(tmp_path)
@@ -820,7 +820,7 @@ class TestCLIReportCommand:
     def test_report_command_missing_dir(self, tmp_path: Path) -> None:
         result = _invoke_in(tmp_path, "report", str(tmp_path / "nonexistent"))
         assert result.exit_code == 1
-        assert "not found" in result.output or "does not exist" in result.output
+        assert "No run found" in result.output
 
     def test_report_command_with_evidence(self, tmp_path: Path) -> None:
         run_dir = _make_run_dir(tmp_path)
