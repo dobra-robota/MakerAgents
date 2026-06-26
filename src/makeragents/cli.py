@@ -82,9 +82,7 @@ def report(
         raise typer.Exit(code=1)
 
     agent = ReportAgent()
-    report_text = agent.generate(run_dir)
-    dest = run_dir / "final-report.md"
-    dest.write_text(report_text, encoding="utf-8")
+    dest = agent.generate(run_dir)
     typer.echo(f"Report written: {dest}")
 
 
