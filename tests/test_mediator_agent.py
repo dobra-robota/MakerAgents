@@ -201,6 +201,227 @@ class TestSaveOutput:
         assert "MANUAL_POC" in content
 
 
+
+
+class TestRunWithLLM:
+    """Tests for the LLM-backed run_with_llm method."""
+
+    @pytest.fixture
+    def agent(self) -> MediatorAgent:
+        return MediatorAgent()
+
+    @pytest.fixture
+    def opportunity(self) -> Opportunity:
+        return _make_opportunity(
+            id_="OPP-llm",
+            maker=65.0,
+            taker=25.0,
+        )
+
+    @staticmethod
+    def _make_llm_client(json_response: dict) -> object:
+        """Return a mock LLMClient whose chat_json returns *json_response*."""
+        import httpx
+
+        payload = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(json_response),
+                },
+            }],
+            "model": "deepseek-chat",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        from makeragents.config import AppConfig
+        from makeragents.llm.client import LLMClient
+
+        transport = httpx.MockTransport(handler)
+        http_client = httpx.Client(transport=transport)
+        cfg = AppConfig(deepseek_api_key="test-key")
+        return LLMClient(config=cfg, http_client=http_client)
+
+    _LLM_DNH = {
+        "vulnerable_groups": "Elderly residents with limited digital access.",
+        "negative_side_effects": "May shift burden to family caregivers.",
+        "abuse_risks": "Low — information-only intervention.",
+        "legal_concerns": "No PII collection; GDPR safe.",
+        "misinformation_risks": "Moderate — must cite sources.",
+        "dependency_risks": "Low — designed for self-service.",
+        "false_authority_risks": "Must disclaim official endorsement.",
+        "safeguards": "Community review panel before publishing.",
+    }
+
+    _FULL_RESPONSE = {
+        "comparison": "Maker value-add is strong (65) vs manageable Taker risk (25).",
+        "verdict": "MANUAL_POC",
+        "do_no_harm": _LLM_DNH,
+        "safe_intervention_shape": "Publish a community-reviewed public guide.",
+        "evidence_too_weak": False,
+    }
+
+    def test_run_with_llm_returns_mediator_result(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        llm = self._make_llm_client(self._FULL_RESPONSE)
+        result = agent.run_with_llm(
+            city="Łodz",
+            community="senior citizens",
+            opportunity=opportunity,
+            maker_summary="Maker: strong value-add case.",
+            taker_summary="Taker: minimal risk.",
+            llm_client=llm,
+        )
+        assert isinstance(result, MediatorResult)
+        assert result.verdict == Verdict.MANUAL_POC
+        assert result.maker_score == 65.0
+        assert result.taker_score == 25.0
+        assert "strong" in result.summary
+
+    def test_do_no_harm_populated_from_llm(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        llm = self._make_llm_client(self._FULL_RESPONSE)
+        result = agent.run_with_llm(
+            city="Łodz",
+            community="senior citizens",
+            opportunity=opportunity,
+            maker_summary="Maker summary",
+            taker_summary="Taker summary",
+            llm_client=llm,
+        )
+        dnh = result.do_no_harm
+        expected_keys = {
+            "vulnerable_groups_affected",
+            "possible_negative_side_effects",
+            "abuse_or_exploitation_risks",
+            "legal_or_tos_concerns",
+            "trust_and_misinformation_risks",
+            "dependency_risks",
+            "gatekeeping_risks",
+            "false_authority_risks",
+            "safeguards_required_before_poc",
+        }
+        assert set(dnh.keys()) == expected_keys
+        # Verify LLM content flowed through
+        assert "Elderly" in dnh["vulnerable_groups_affected"]
+        assert "burden" in dnh["possible_negative_side_effects"]
+        assert "GDPR" in dnh["legal_or_tos_concerns"]
+        assert "Community review" in dnh["safeguards_required_before_poc"]
+
+    def test_save_output_after_run_with_llm(
+        self, agent: MediatorAgent, opportunity: Opportunity, tmp_path: Path,
+    ) -> None:
+        llm = self._make_llm_client(self._FULL_RESPONSE)
+        result = agent.run_with_llm(
+            city="Łodz",
+            community="senior citizens",
+            opportunity=opportunity,
+            maker_summary="Maker summary",
+            taker_summary="Taker summary",
+            llm_client=llm,
+        )
+        json_path, md_path = agent.save_output(result, tmp_path)
+        assert json_path.exists()
+        assert md_path.exists()
+
+        # Check JSON content
+        data = json.loads(json_path.read_text())
+        assert data["verdict"] == "MANUAL_POC"
+        assert "do_no_harm" in data
+
+        # Check Markdown content
+        md_content = md_path.read_text()
+        assert "MANUAL_POC" in md_content
+        assert "# Mediator Report" in md_content
+        assert "## Do No Harm" in md_content
+        assert "Elderly" in md_content
+        assert "GDPR" in md_content
+
+    def test_default_verdict_for_unrecognised_string(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        resp = dict(self._FULL_RESPONSE, verdict="BOGUS")
+        llm = self._make_llm_client(resp)
+        result = agent.run_with_llm(
+            city="x",
+            community="y",
+            opportunity=opportunity,
+            maker_summary="m",
+            taker_summary="t",
+            llm_client=llm,
+        )
+        assert result.verdict == Verdict.RESEARCH_MORE
+
+    def test_evidence_too_weak_flag_in_llm_response(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        """The evidence_too_weak key is parsed but not stored directly;
+        the LLM should convey this through the comparison text and verdict."""
+        resp = dict(self._FULL_RESPONSE, evidence_too_weak=True, verdict="WATCH")
+        llm = self._make_llm_client(resp)
+        result = agent.run_with_llm(
+            city="x",
+            community="y",
+            opportunity=opportunity,
+            maker_summary="m",
+            taker_summary="t",
+            llm_client=llm,
+        )
+        # Weak evidence should be reflected in verdict choice
+        assert result.verdict == Verdict.WATCH
+
+    def test_prompts_loaded_with_correct_city_community(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        """Sanity check: the loaded prompt includes our substitutions."""
+        resp = dict(self._FULL_RESPONSE)
+        llm = self._make_llm_client(resp)
+        result = agent.run_with_llm(
+            city="Gdynia",
+            community="students",
+            opportunity=opportunity,
+            maker_summary="M",
+            taker_summary="T",
+            llm_client=llm,
+        )
+        assert result.verdict == Verdict.MANUAL_POC
+
+    def test_passes_opportunity_type_to_llm(
+        self, agent: MediatorAgent, opportunity: Opportunity,
+    ) -> None:
+        """The opportunity's type should be part of the prompt."""
+        resp = dict(self._FULL_RESPONSE)
+        llm = self._make_llm_client(resp)
+        opp = _make_opportunity(id_="OPP-TYPE", o_type=OpportunityType.PUBLIC_GUIDE)
+        result = agent.run_with_llm(
+            city="x", community="y",
+            opportunity=opp,
+            maker_summary="M", taker_summary="T",
+            llm_client=llm,
+        )
+        assert result.verdict == Verdict.MANUAL_POC
+
+    def test_no_scores_fallback(
+        self, agent: MediatorAgent,
+    ) -> None:
+        """When scores are None, maker/taker are set to zero."""
+        resp = dict(self._FULL_RESPONSE)
+        llm = self._make_llm_client(resp)
+        opp = _make_opportunity(id_="OPP-NOSCORE")
+        opp.scores = None
+        result = agent.run_with_llm(
+            city="x", community="y",
+            opportunity=opp,
+            maker_summary="M", taker_summary="T",
+            llm_client=llm,
+        )
+        assert result.maker_score == 0.0
+        assert result.taker_score == 0.0
+
 class TestMediatorResult:
     def test_model_dump_json(self) -> None:
         result = MediatorResult(

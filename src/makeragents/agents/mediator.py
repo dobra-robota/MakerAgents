@@ -12,6 +12,8 @@ from pathlib import Path
 
 from pydantic import Field
 
+from makeragents.llm import ChatMessage
+from makeragents.prompts import load_prompt
 from makeragents.run import slugify
 from makeragents.schemas import (
     MakerAgentsModel,
@@ -163,6 +165,42 @@ class MediatorResult(MakerAgentsModel):
 # Agent
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# LLM response helpers
+# ---------------------------------------------------------------------------
+
+_VERDICT_MAP: dict[str, Verdict] = {
+    v.value: v for v in Verdict
+}
+
+
+def _parse_llm_mediation(raw: dict) -> dict:
+    """Parse and normalise an LLM mediation JSON response.
+
+    Maps the prompt's output keys (PRD §7.6) to the internal
+    ``MediatorResult`` field names used by ``_to_markdown``.
+    """
+    dnh_raw: dict = raw.get("do_no_harm", {})
+    return {
+        "comparison": raw.get("comparison", ""),
+        "verdict": _VERDICT_MAP.get(
+            raw.get("verdict", "").strip().upper(), Verdict.RESEARCH_MORE,
+        ),
+        "do_no_harm": {
+            "vulnerable_groups_affected": dnh_raw.get("vulnerable_groups", ""),
+            "possible_negative_side_effects": dnh_raw.get("negative_side_effects", ""),
+            "abuse_or_exploitation_risks": dnh_raw.get("abuse_risks", ""),
+            "legal_or_tos_concerns": dnh_raw.get("legal_concerns", ""),
+            "trust_and_misinformation_risks": dnh_raw.get("misinformation_risks", ""),
+            "dependency_risks": dnh_raw.get("dependency_risks", ""),
+            "gatekeeping_risks": dnh_raw.get("dependency_risks", ""),
+            "false_authority_risks": dnh_raw.get("false_authority_risks", ""),
+            "safeguards_required_before_poc": dnh_raw.get("safeguards", ""),
+        },
+        "safe_intervention_shape": raw.get("safe_intervention_shape", ""),
+        "evidence_too_weak": raw.get("evidence_too_weak", False),
+    }
 class MediatorAgent:
     """Compares Maker and Taker arguments and assigns a verdict."""
 
@@ -205,6 +243,78 @@ class MediatorAgent:
             recommended_intervention_shape=rec_shape,
             evidence_ids=list(opportunity.evidence_ids),
             summary=summary,
+        )
+
+
+    # ------------------------------------------------------------------
+    # LLM-backed mediation
+    # ------------------------------------------------------------------
+
+    def run_with_llm(
+        self,
+        *,
+        city: str,
+        community: str,
+        opportunity: Opportunity,
+        maker_summary: str,
+        taker_summary: str,
+        llm_client: object,
+    ) -> MediatorResult:
+        """Run LLM-backed mediation: compare Maker/Taker, assign verdict, produce Do No Harm.
+
+        Args:
+            city: The city for this run.
+            community: The community for this run.
+            opportunity: The :class:`~makeragents.schemas.Opportunity` under review.
+            maker_summary: Text summary of the Maker argument.
+            taker_summary: Text summary of the Taker argument.
+            llm_client: An :class:`LLMClient` instance (from ``makeragents.llm``).
+
+        Returns:
+            A :class:`MediatorResult` populated from the LLM response.
+
+        Raises:
+            LLMProviderError: If the LLM call fails or returns unparseable JSON.
+        """
+        opp_info = (
+            f"Opportunity: {opportunity.title}\n"
+            f"Type: {opportunity.type.value}\n"
+            f"Pain: {opportunity.pain_summary}\n"
+            f"Beneficiaries: {', '.join(opportunity.who_benefits)}\n"
+            f"Speculative: {opportunity.speculative}"
+        )
+
+        prompt = load_prompt(
+            "mediator",
+            city=city,
+            community=community,
+            opportunity_summary=opp_info,
+            maker_summary=maker_summary,
+            taker_summary=taker_summary,
+        )
+
+        response = llm_client.chat_json(
+            [ChatMessage("user", prompt)],
+            temperature=0.3,
+        )
+
+        parsed = _parse_llm_mediation(response)
+
+        scores = opportunity.scores
+        maker = float(scores.maker_score) if scores else 0.0
+        taker = float(scores.taker_score) if scores else 0.0
+        balance = _balance_summary(maker, taker)
+
+        return MediatorResult(
+            opportunity_id=opportunity.id,
+            verdict=parsed["verdict"],
+            maker_score=maker,
+            taker_score=taker,
+            balance_summary=balance,
+            do_no_harm=parsed["do_no_harm"],
+            recommended_intervention_shape=parsed["safe_intervention_shape"],
+            evidence_ids=list(opportunity.evidence_ids),
+            summary=parsed["comparison"],
         )
 
     def save_output(
