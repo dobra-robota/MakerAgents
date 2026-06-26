@@ -8,7 +8,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-from makeragents.scoring import compute_low_harm_score, compute_rank_score
+from makeragents.scoring import compute_rank_score
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 ScoreValue = Annotated[float, Field(ge=0, le=100)]

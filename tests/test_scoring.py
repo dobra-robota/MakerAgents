@@ -179,32 +179,31 @@ def test_weights_sum_to_one() -> None:
 # ── same scale for any opportunity type ───────────────────────────────────
 
 
-def test_same_function_for_any_opportunity_type() -> None:
-    """Commercial and non-commercial opportunities use the same formula.
+def test_rank_score_boundary_extremes() -> None:
+    """Rank score at the [0, 100] boundary for all component scores.
 
-    The scoring engine is pure math; it has no notion of opportunity type.
-    Any caller passes the same six scores regardless of whether the
-    opportunity is commercial or non-commercial.
+    harm_risk=0 → low_harm=100 gives maximum low-harm contribution (14.0);
+    harm_risk=100 → low_harm=0 gives zero contribution.
     """
-    # Simulate a "commercial" set of scores — the function does not care.
-    commercial = compute_rank_score(
-        people_helped_score=80,
-        severity_score=70,
-        validity_score=90,
-        intervention_ease_score=85,
-        harm_risk_score=10,
-        ability_to_act_score=95,
-    )
-    # Same scores run through the same function — obviously same result.
-    same = compute_rank_score(
-        people_helped_score=80,
-        severity_score=70,
-        validity_score=90,
-        intervention_ease_score=85,
-        harm_risk_score=10,
-        ability_to_act_score=95,
-    )
-    assert commercial == same
+    # All scores at 0, harm_risk=0 → only low-harm term: 100 * 0.14 = 14.0
+    assert compute_rank_score(
+        people_helped_score=0,
+        severity_score=0,
+        validity_score=0,
+        intervention_ease_score=0,
+        harm_risk_score=0,
+        ability_to_act_score=0,
+    ) == 14.0
+
+    # All scores at 100, harm_risk=100 → low_harm=0: 100 * (1.0 - 0.14) = 86.0
+    assert compute_rank_score(
+        people_helped_score=100,
+        severity_score=100,
+        validity_score=100,
+        intervention_ease_score=100,
+        harm_risk_score=100,
+        ability_to_act_score=100,
+    ) == 86.0
 
 
 # ── backward compatibility via ScoreSet.calculate_rank_score ──────────────
