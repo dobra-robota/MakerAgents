@@ -1,21 +1,8 @@
-import os
 from pathlib import Path
 
 import yaml
-from typer.testing import CliRunner
 
-from makeragents.cli import app
-
-runner = CliRunner()
-
-
-def _invoke_in(tmp_path: Path, *args: str):
-    cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        return runner.invoke(app, list(args))
-    finally:
-        os.chdir(cwd)
+from tests.conftest import _invoke_in
 
 
 def test_run_command_creates_run_folder(tmp_path: Path) -> None:
