@@ -67,6 +67,40 @@ def _make_mock_llm_client_error() -> LLMClient:
     return LLMClient(config=cfg, http_client=client)
 
 
+
+def _make_mock_llm_client_dict(
+    query_dicts: list[dict[str, str]] | None = None,
+) -> LLMClient:
+    """Return an LLMClient that returns dict-format queries with language."""
+
+    if query_dicts is None:
+        query_dicts = [
+            {"query": "senior citizens problems Łodz", "language": "en"},
+            {"query": "problemy seniorów Łodź", "language": "pl"},
+        ]
+
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"queries": query_dicts}),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "model": "deepseek-chat",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    cfg = AppConfig(deepseek_api_key="test-key")
+    return LLMClient(config=cfg, http_client=client)
+
+
 def _make_mock_client() -> SearchClient:
     """Return a SearchClient whose primary provider returns canned results."""
 
@@ -346,3 +380,197 @@ class TestResearchAgentSearch:
         for qr in result.query_results:
             assert qr.results_count == 2  # mock only returns 2
             assert len(qr.results) == 2
+
+
+class TestInferQueryLanguage:
+    """Unit tests for the _infer_query_language static method."""
+
+    def test_english_query_returns_en(self) -> None:
+        assert (
+            ResearchAgent._infer_query_language(
+                "senior citizens problems Łodz", "Łodz"
+            )
+            == "en"
+        )
+
+    def test_polish_name_tag_returns_pl(self) -> None:
+        assert (
+            ResearchAgent._infer_query_language(
+                "problemy seniorów Łodź [polish]", "Łodz"
+            )
+            == "pl"
+        )
+
+    def test_polish_code_tag_returns_pl(self) -> None:
+        assert (
+            ResearchAgent._infer_query_language(
+                "[pl] problemy seniorów Łodź", "Łodz"
+            )
+            == "pl"
+        )
+
+    def test_german_tag_returns_de(self) -> None:
+        assert (
+            ResearchAgent._infer_query_language(
+                "[de] probleme von senioren Berlin", "Berlin"
+            )
+            == "de"
+        )
+
+    def test_unknown_city_english_only_returns_en(self) -> None:
+        assert (
+            ResearchAgent._infer_query_language(
+                "students problems Smallville", "Smallville"
+            )
+            == "en"
+        )
+
+    def test_heuristic_polish_queries_inferred_as_pl(self) -> None:
+        """The heuristic generate_queries tags Polish queries with [polish]."""
+
+        queries = ResearchAgent.generate_queries("Łodz", "senior citizens")
+        polish_queries = [q for q in queries if "[polish]" in q.lower()]
+        assert len(polish_queries) > 0
+        for q in polish_queries:
+            assert ResearchAgent._infer_query_language(q, "Łodz") == "pl"
+
+    def test_heuristic_english_queries_inferred_as_en(self) -> None:
+        queries = ResearchAgent.generate_queries("Łodz", "senior citizens")
+        english_queries = [q for q in queries if "[polish]" not in q.lower()]
+        assert len(english_queries) > 0
+        for q in english_queries:
+            assert ResearchAgent._infer_query_language(q, "Łodz") == "en"
+
+
+class TestLanguageInSearchResults:
+    """Test that search results carry language metadata for downstream use."""
+
+    def test_search_results_have_language_field(self, tmp_path: Path) -> None:
+        """Every ResearchQueryResult from search() has a language field."""
+        agent = ResearchAgent(search_client=_make_mock_client())
+
+        result = agent.search(
+            run_dir=tmp_path,
+            city="Łodz",
+            community="senior citizens",
+            queries_per_run=10,
+            results_per_query=1,
+        )
+
+        languages = {qr.language for qr in result.query_results}
+        # Heuristic queries for Łodz produce both en and pl
+        assert "en" in languages, (
+            f"Expected English queries in results, got languages: {languages}"
+        )
+        assert "pl" in languages, (
+            f"Expected Polish queries in results, got languages: {languages}"
+        )
+
+    def test_language_persisted_in_json_output(self, tmp_path: Path) -> None:
+        """The language field is serialized in the persisted JSON."""
+        agent = ResearchAgent(search_client=_make_mock_client())
+
+        agent.search(
+            run_dir=tmp_path,
+            city="Łodz",
+            community="senior citizens",
+            queries_per_run=3,
+            results_per_query=1,
+        )
+
+        json_path = tmp_path / "sources" / "search-results.json"
+        content = json_path.read_text(encoding="utf-8")
+        assert '"language"' in content, (
+            "language field missing from persisted JSON"
+        )
+        assert '"en"' in content or '"pl"' in content, (
+            "Expected language codes en or pl in JSON output"
+        )
+
+    def test_smallville_only_english_language(self, tmp_path: Path) -> None:
+        """Unknown city only produces English-language query results."""
+        agent = ResearchAgent(search_client=_make_mock_client())
+
+        result = agent.search(
+            run_dir=tmp_path,
+            city="Smallville",
+            community="students",
+            queries_per_run=3,
+            results_per_query=1,
+        )
+
+        languages = {qr.language for qr in result.query_results}
+        assert languages == {"en"}, (
+            f"Expected only English for unknown city, got: {languages}"
+        )
+
+
+class TestLLMQueryLanguageInference:
+    """Test that LLM path preserves language metadata."""
+
+    def test_llm_dict_queries_parsed_correctly(self) -> None:
+        """LLM-generated dict-format queries are parsed; language inferred."""
+        query_dicts = [
+            {"query": "[en] senior citizens problems Łodz", "language": "en"},
+            {"query": "[pl] problemy seniorów Łodź", "language": "pl"},
+        ]
+        llm = _make_mock_llm_client_dict(query_dicts)
+        agent = ResearchAgent(
+            search_client=_make_mock_client(), llm_client=llm
+        )
+
+        result = agent.llm_generate_queries(
+            "Łodz", "senior citizens", max_queries=2
+        )
+        assert len(result) == 2
+        # Both queries are returned (stripped of dict wrapper)
+        assert "[en] senior citizens problems Łodz" in result
+        assert "[pl] problemy seniorów Łodź" in result
+
+    def test_llm_search_results_have_en_and_pl_language(
+        self, tmp_path: Path
+    ) -> None:
+        """Search via LLM path yields both en and pl language results."""
+        query_dicts = [
+            {"query": "[en] senior citizens problems Łodz", "language": "en"},
+            {"query": "[pl] problemy seniorów Łodź", "language": "pl"},
+            {"query": "[en] senior citizens help Łodz", "language": "en"},
+        ]
+        llm = _make_mock_llm_client_dict(query_dicts)
+        agent = ResearchAgent(
+            search_client=_make_mock_client(), llm_client=llm
+        )
+
+        result = agent.search(
+            run_dir=tmp_path,
+            city="Łodz",
+            community="senior citizens",
+            queries_per_run=3,
+            results_per_query=1,
+        )
+
+        languages = {qr.language for qr in result.query_results}
+        assert "en" in languages
+        assert "pl" in languages
+
+    def test_llm_fallback_produces_polish_queries(
+        self, tmp_path: Path
+    ) -> None:
+        """When LLM errors, fallback to heuristic still produces Polish."""
+        llm = _make_mock_llm_client_error()
+        agent = ResearchAgent(
+            search_client=_make_mock_client(), llm_client=llm
+        )
+
+        result = agent.search(
+            run_dir=tmp_path,
+            city="Łodz",
+            community="senior citizens",
+            queries_per_run=10,
+            results_per_query=1,
+        )
+
+        languages = {qr.language for qr in result.query_results}
+        assert "pl" in languages, (
+            f"Fallback heuristic should produce Polish queries, got: {languages}"
+        )

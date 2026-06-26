@@ -19,6 +19,7 @@ class TestLoadPrompt:
             city="Łodz",
             community="senior citizens",
             max_queries="10",
+            languages="English (en), Polish (pl)",
         )
         assert "Research Agent" in result
         assert "Łodz" in result
@@ -180,10 +181,11 @@ class TestVariableSubstitution:
             city="Łodz",
             community="senior citizens",
             max_queries="10",
+            languages="English (en)",
         )
         # Unknown placeholders are left as-is with safe_substitute.
-        # The research prompt uses ${city}, ${community}, ${max_queries}
-        # so there should be nothing left.
+        # The research prompt uses ${city}, ${community}, ${max_queries},
+        # ${languages} — all supplied, so there should be nothing left.
         assert "${" not in result
 
     def test_substitution_with_dollar_sign(self) -> None:
