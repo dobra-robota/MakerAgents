@@ -22,7 +22,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/makeragents"]
-include = ["src/makeragents/data/*.yaml"]
+include = ["src/makeragents/data/*.yaml", "src/makeragents/data/prompts/*.md"]
 
 [dependency-groups]
 dev = [
