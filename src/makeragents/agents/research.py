@@ -13,11 +13,14 @@ The :class:`ResearchAgent` is the first agent in the pipeline. It:
 
 from __future__ import annotations
 
+from typing import Any
+
 from pathlib import Path
 
 from makeragents.config import AppConfig, load_config
 from makeragents.schemas import MakerAgentsModel
 from makeragents.search.client import ProviderResponse, SearchClient
+from makeragents.search.providers import SearchResult
 
 # ---------------------------------------------------------------------------
 # City → language mapping — a small, auditable dictionary for v0.
@@ -92,7 +95,8 @@ class ResearchQueryResult(MakerAgentsModel):
     query: str
     provider: str
     results_count: int
-    results: list[dict[str, str]]
+    results: list[SearchResult]
+    raw: Any = None
 
 
 class SearchResultsOutput(MakerAgentsModel):
@@ -235,10 +239,8 @@ class ResearchAgent:
                     query=query,
                     provider=response.provider,
                     results_count=len(response.results),
-                    results=[
-                        {"title": r.title, "url": r.url, "snippet": r.snippet}
-                        for r in response.results
-                    ],
+                    results=list(response.results),
+                    raw=response.raw,
                 )
             )
 

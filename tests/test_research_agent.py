@@ -23,17 +23,18 @@ def _make_mock_client() -> SearchClient:
         name = "brave"
 
         def search(self, query: str, *, count: int = 5) -> ProviderResponse:
+            results = [
+                SearchResult(
+                    title=f"Result {i} for: {query}",
+                    url=f"https://example.com/{i}",
+                    snippet=f"Snippet {i} for {query}.",
+                )
+                for i in range(count)
+            ]
             return ProviderResponse(
                 provider="brave",
-                results=[
-                    SearchResult(
-                        title=f"Result {i} for: {query}",
-                        url=f"https://example.com/{i}",
-                        snippet=f"Snippet {i} for {query}.",
-                    )
-                    for i in range(count)
-                ],
-                raw={},
+                results=results,
+                raw={"mock": True, "query": query, "result_count": len(results)},
             )
 
     return SearchClient(primary=_MockProvider())
@@ -109,6 +110,14 @@ class TestResearchAgentSearch:
             assert isinstance(qr, ResearchQueryResult)
             assert qr.results_count == 2
             assert len(qr.results) == 2
+            # Each result is a SearchResult with typed attributes
+            for r in qr.results:
+                assert isinstance(r, SearchResult)
+                assert r.title
+                assert r.url
+            # Raw payload is preserved
+            assert qr.raw is not None
+            assert qr.raw["mock"] is True
 
     def test_search_saves_json_to_sources_directory(
         self, tmp_path: Path
@@ -142,3 +151,35 @@ class TestResearchAgentSearch:
 
         assert len(result.query_results) == 1
         assert result.query_results[0].provider == "brave"
+
+    def test_partial_results_count(self, tmp_path: Path) -> None:
+        """When the provider returns fewer results than results_per_query,
+        results_count reflects the actual number returned."""
+
+        class _LimitedMockProvider:
+            name = "brave"
+
+            def search(self, query: str, *, count: int = 5) -> ProviderResponse:
+                # Always returns 2 results regardless of requested count
+                return ProviderResponse(
+                    provider="brave",
+                    results=[
+                        SearchResult(title=f"R1 {query}", url="https://a.com", snippet="Snippet 1"),
+                        SearchResult(title=f"R2 {query}", url="https://b.com", snippet="Snippet 2"),
+                    ],
+                    raw={"mock": True},
+                )
+
+        agent = ResearchAgent(search_client=SearchClient(primary=_LimitedMockProvider()))
+
+        result = agent.search(
+            run_dir=tmp_path,
+            city="Łodz",
+            community="senior citizens",
+            queries_per_run=2,
+            results_per_query=10,
+        )
+
+        for qr in result.query_results:
+            assert qr.results_count == 2  # mock only returns 2
+            assert len(qr.results) == 2
