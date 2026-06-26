@@ -2,18 +2,25 @@
 
 Takes raw search results and produces validated :class:`EvidenceItem` entries
 with trust scores, evidence type classification, and conflict detection.
+
+When an :class:`~makeragents.llm.client.LLMClient` is available this agent
+uses LLM-backed classification for evidence type, language, confidence,
+recency, and claim classification, keeping the heuristic path as a fallback.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from pydantic import Field
 
+from makeragents.llm.client import ChatMessage, LLMClient, LLMClientError
+from makeragents.prompts import load_prompt
 from makeragents.schemas import (
     ClaimClassification,
     Confidence,
@@ -27,6 +34,8 @@ from makeragents.sources.registry import SourceRegistry, load_registry
 
 if TYPE_CHECKING:
     from makeragents.search.providers import SearchResult
+
+logger = logging.getLogger(__name__)
 
 _MAX_SNIPPET_LENGTH = 500
 _JACCARD_THRESHOLD = 0.75
@@ -152,6 +161,43 @@ def _estimate_confidence(trust_score: float, e_type: EvidenceType) -> Confidence
     return Confidence.LOW
 
 
+# ---------------------------------------------------------------------------
+# Recency extraction (heuristic fallback when LLM is unavailable)
+# ---------------------------------------------------------------------------
+
+# Common date-like patterns in snippet text.
+_RECENCY_PATTERNS: list[tuple[str, str | None]] = [
+    # "2024-03-15" or "2024/03/15"
+    (r"\b(20\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b", None),
+    # "15 March 2024" or "March 15, 2024"
+    (r"\b(\d{1,2})[ /]*(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+     r"[, ]+(\d{4})\b", None),
+    # Relative: "2 days ago", "3 weeks ago", "last month", "yesterday"
+    (r"\b(\d+)\s+(day|week|month|year)s?\s+ago\b", None),
+    (r"\b(last\s+(week|month|year|night)|yesterday|today)\b", None),
+    # Year-only: "in 2023", "since 2022"
+    (r"\b(20\d{2})\b", None),
+]
+
+
+def _extract_recency_from_snippet(snippet: str) -> str:
+    """Best-effort date extraction from snippet text.
+
+    Returns the first matched date-like substring or ``"unknown"``
+    when no recognizable date pattern is found.  Used only as a
+    heuristic fallback; the LLM path provides richer recency labels.
+    """
+    if not snippet:
+        return "unknown"
+    snippet_lower = snippet.lower()
+    for pattern, _ in _RECENCY_PATTERNS:
+        match = re.search(pattern, snippet_lower, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    return "unknown"
+
+
 class ConflictResult(MakerAgentsModel):
     """Detected conflict between official and community evidence."""
 
@@ -163,10 +209,21 @@ class ConflictResult(MakerAgentsModel):
 
 
 class EvidenceAgent:
-    """Classifies, deduplicates, and scores evidence from search results."""
+    """Classifies, deduplicates, and scores evidence from search results.
 
-    def __init__(self, registry: SourceRegistry | None = None) -> None:
+    When *llm_client* is provided and the research context (*city* /
+    *community*) is supplied, this agent batch-classifies evidence types
+    via the LLM and falls back to keyword heuristics on failure.
+    """
+
+    def __init__(
+        self,
+        registry: SourceRegistry | None = None,
+        *,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self._registry = registry if registry is not None else load_registry()
+        self._llm = llm_client
 
     # ------------------------------------------------------------------
     # Public API
@@ -178,12 +235,47 @@ class EvidenceAgent:
         *,
         run_id: str = "unknown",
         language: str = "en",
+        city: str = "",
+        community: str = "",
     ) -> list[EvidenceItem]:
-        """Process raw search results into scored, deduplicated evidence items."""
-        items: list[EvidenceItem] = []
-        for r in results:
+        """Process raw search results into scored, deduplicated evidence items.
+
+        When ``city`` and ``community`` are both provided and an LLM client
+        is configured, evidence type, language, confidence, recency, and
+        claim classification are assigned by the LLM in a single batch call;
+        the heuristic path is used as fallback on any LLM error.
+        """
+        llm_classifications: dict[int, dict[str, Any]] = {}
+
+        if city and community and self._llm is not None:
             try:
-                items.append(self._to_evidence_item(r, run_id, language))
+                llm_classifications = self._classify_batch_with_llm(
+                    results, city=city, community=community
+                )
+            except LLMClientError:
+                logger.warning(
+                    "LLM classification failed for run %s; "
+                    "falling back to keyword heuristics.",
+                    run_id,
+                    exc_info=True,
+                )
+            except Exception:
+                logger.warning(
+                    "Unexpected error during LLM classification for run %s; "
+                    "falling back to keyword heuristics.",
+                    run_id,
+                    exc_info=True,
+                )
+
+        items: list[EvidenceItem] = []
+        for idx, r in enumerate(results):
+            try:
+                llm_data = llm_classifications.get(idx)
+                items.append(
+                    self._to_evidence_item(
+                        r, run_id, language, llm_classification=llm_data,
+                    )
+                )
             except Exception:
                 continue  # skip malformed URLs and other construction errors
         items = self._deduplicate(items)
@@ -274,6 +366,93 @@ class EvidenceAgent:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _classify_batch_with_llm(
+        self,
+        results: list[SearchResult],
+        *,
+        city: str,
+        community: str,
+    ) -> dict[int, dict[str, Any]]:
+        """Classify a batch of search result snippets via the LLM.
+
+        Returns a mapping from result index → LLM-assigned fields
+        (``evidence_type``, ``language``, ``confidence``, ``recency``,
+        ``claim_classification``).
+
+        Raises :class:`LLMClientError` on provider failures so the caller
+        can fall back to heuristics.
+        """
+        if self._llm is None:
+            raise LLMClientError("No LLM client configured.")
+
+        # Build the snippets block for the prompt.
+        snippet_lines: list[str] = []
+        for idx, r in enumerate(results):
+            truncated = r.snippet[: _MAX_SNIPPET_LENGTH]
+            snippet_lines.append(
+                f"- **Snippet {idx}** (title: {r.title}): {truncated}"
+            )
+        snippets_block = "\n".join(snippet_lines)
+
+        prompt = load_prompt(
+            "evidence",
+            city=city,
+            community=community,
+            snippets=snippets_block,
+        )
+        messages = [ChatMessage(role="user", content=prompt)]
+        response = self._llm.chat_json(messages, temperature=0.3)
+
+        # Parse the LLM response into index-keyed dict.
+        raw_items: list[dict[str, Any]] = (
+            response.get("items") if isinstance(response, dict) else []
+        )
+        if not isinstance(raw_items, list):
+            logger.warning("LLM evidence response missing 'items' list; using heuristics.")
+            return {}
+
+        parsed: dict[int, dict[str, Any]] = {}
+        valid_evidence_types = frozenset(e.value for e in EvidenceType)
+        valid_confidences = frozenset(c.value for c in Confidence)
+        valid_claims = frozenset(cc.value for cc in ClaimClassification)
+
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("snippet_index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(results):
+                continue
+
+            etype = item.get("evidence_type", "unknown")
+            if not isinstance(etype, str) or etype not in valid_evidence_types:
+                etype = "unknown"
+
+            lang = item.get("language", "en")
+            if not isinstance(lang, str) or not lang.strip():
+                lang = "en"
+
+            conf = item.get("confidence", "medium")
+            if not isinstance(conf, str) or conf not in valid_confidences:
+                conf = "medium"
+
+            recency = item.get("recency", "unknown")
+            if not isinstance(recency, str) or not recency.strip():
+                recency = "unknown"
+
+            claim = item.get("claim_classification", "unknown")
+            if not isinstance(claim, str) or claim not in valid_claims:
+                claim = "unknown"
+
+            parsed[idx] = {
+                "evidence_type": EvidenceType(etype),
+                "language": lang.strip(),
+                "confidence": Confidence(conf),
+                "recency": recency.strip(),
+                "claim_classification": ClaimClassification(claim),
+            }
+
+        return parsed
+
     def _to_evidence_item(
         self,
         result: SearchResult,
@@ -281,15 +460,32 @@ class EvidenceAgent:
         language: str,
         *,
         source_type_hint: SourceType | None = None,
+        llm_classification: dict[str, Any] | None = None,
     ) -> EvidenceItem:
-        """Convert a single search result into a preliminary EvidenceItem."""
+        """Convert a single search result into a preliminary EvidenceItem.
+
+        When *llm_classification* is provided it supplies the LLM-assigned
+        ``evidence_type``, ``language``, ``confidence``, ``recency``, and
+        ``claim_classification``, overriding the heuristic path for those
+        fields.  Source type and trust score are always computed mechanically.
+        """
         domain = _extract_domain(result.url)
         src_type = source_type_hint if source_type_hint is not None else _classify_source_type(domain)
-        e_type = _classify_evidence_type(result.snippet, src_type)
         trust = self._registry.score_for_domain(domain, src_type.value)
         snippet = result.snippet[: _MAX_SNIPPET_LENGTH]
-        confidence = _estimate_confidence(trust, e_type)
-        claim_class = _classify_claim(e_type, trust)
+
+        if llm_classification is not None:
+            e_type = llm_classification["evidence_type"]
+            item_language = llm_classification["language"]
+            confidence = llm_classification["confidence"]
+            recency = llm_classification["recency"]
+            claim_class = llm_classification["claim_classification"]
+        else:
+            e_type = _classify_evidence_type(snippet, src_type)
+            item_language = language
+            confidence = _estimate_confidence(trust, e_type)
+            recency = _extract_recency_from_snippet(snippet)
+            claim_class = _classify_claim(e_type, trust)
 
         return EvidenceItem(
             id="TEMP",  # assigned after dedup
@@ -298,10 +494,10 @@ class EvidenceAgent:
             source_type=src_type,
             evidence_type=e_type,
             snippet=snippet,
-            language=language,
+            language=item_language,
             claim_classification=claim_class,
             trust_score=trust,  # type: ignore[arg-type]
-            recency="unknown",  # TODO: extract recency from search result metadata (dates, HTTP headers)
+            recency=recency,
             confidence=confidence,
         )
 
