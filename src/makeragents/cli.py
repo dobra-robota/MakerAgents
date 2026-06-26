@@ -9,10 +9,13 @@ import typer
 from makeragents.agents.report import ReportAgent
 from makeragents.retry import (
     PIPELINE_STEPS,
+    _RETRYABLE_STEPS,
     get_incomplete_steps,
+    load_opportunity_for_retry,
     mark_steps_complete,
     read_opportunity_state,
     read_status,
+    run_retry_step,
     write_status,
 )
 from makeragents.run import build_run_metadata, create_run_folder
@@ -129,20 +132,98 @@ def retry(
         return
 
     state = read_opportunity_state(opp_dir)
+
+    # Separate retryable steps (maker/taker/mediator/cost_checker) from
+    # pre-processing steps (research/evidence/opportunity) which cannot be
+    # re-run from on-disk state alone (PRD §15).
+    retryable = [s for s in incomplete if s in _RETRYABLE_STEPS]
+    skipped = [s for s in incomplete if s not in _RETRYABLE_STEPS]
+
     typer.echo(f"Retrying opportunity: {opportunity}")
     typer.echo(
         f"  Existing artifacts: {', '.join(state['artifacts']) if state['artifacts'] else '(none)'}"
     )
-    typer.echo(f"  Steps to retry: {', '.join(incomplete)}")
+
+    if skipped:
+        typer.echo(
+            f"  Skipping (pre-processing, cannot be re-run): {', '.join(skipped)}"
+        )
+
+    if not retryable:
+        if skipped:
+            typer.echo(
+                "All incomplete steps are pre-processing steps that cannot be "
+                "re-run from on-disk state."
+            )
+        else:
+            typer.echo(
+                f"All steps are already complete for opportunity '{opportunity}'."
+            )
+        return
+
+    typer.echo(f"  Steps to retry: {', '.join(retryable)}")
     typer.echo(
         f"  Already complete: {', '.join(s for s in PIPELINE_STEPS if s not in incomplete)}"
     )
 
-    # TODO(#14): Wire up agent pipeline — currently just marks steps complete.
-    updated = mark_steps_complete(status, incomplete)
-    write_status(opp_dir, updated)
+    # Load on-disk state needed by downstream agents.
+    try:
+        opp, evidence_items = load_opportunity_for_retry(opp_dir, run_dir)
+    except FileNotFoundError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # Execute each incomplete retryable step in pipeline order, persisting
+    # progress after each successful step.
+    failed = False
+    for step in retryable:
+        typer.echo(f"  → Running {step} agent ...")
+        try:
+            opp = run_retry_step(
+                step=step,
+                opportunity=opp,
+                evidence_items=evidence_items,
+                opp_dir=opp_dir,
+                run_dir=run_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"  ✗ {step} agent failed: {exc}", err=True)
+            failed = True
+            # Stop early — do not run downstream steps on a broken
+            # opportunity state.
+            break
+
+        # Mark this step complete immediately so progress is durable.
+        status = mark_steps_complete(status, [step])
+        write_status(opp_dir, status)
+        typer.echo(f"  ✓ {step} complete")
+
+    if not failed:
+        # Re-render the final report so it picks up the new outputs.
+        typer.echo("  → Re-generating final-report.md ...")
+        try:
+            report_agent = ReportAgent()
+            dest = report_agent.generate(run_dir)
+            typer.echo(f"  ✓ Report written: {dest}")
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"  ✗ Report generation failed: {exc}", err=True)
+            failed = True
+
+    if failed:
+        completed_now = [
+            s for s in retryable
+            if s in status.get("steps", {})
+            and status["steps"][s] == "complete"
+            and s in incomplete
+        ]
+        typer.echo(
+            f"Retry finished with failures — "
+            f"{len(completed_now)} step(s) completed before error."
+        )
+        raise typer.Exit(code=1)
+
     typer.echo(
-        f"Retry complete — all {len(incomplete)} step(s) now marked complete."
+        f"Retry complete — {len(retryable)} step(s) successfully executed."
     )
 
 
