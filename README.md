@@ -18,12 +18,40 @@ The repository now has a `uv`-managed Python package scaffold with Pydantic sche
 
 ## Development
 
+We use [mise](https://mise.jdx.dev/) for reproducible dev tooling (Python and uv versions).
+
+One-time setup after cloning:
+
 ```bash
+# Install mise if you don't have it: https://mise.jdx.dev/getting-started.html
+mise trust
+mise install
+```
+
+After setup, day-to-day workflows:
+
+```bash
+mise run sync   # uv sync
+mise run test   # uv run pytest
+# or run the commands directly:
 uv sync
 uv run pytest
 ```
 
 Tests use local fixtures only and do not require real API keys.
+
+### API Keys
+
+Create a `.env` file (not committed) for your API keys. Mise loads it via `.mise.toml`:
+
+```bash
+OPENAI_API_KEY="sk-..."
+DEEPSEEK_API_KEY="sk-..."
+BRAVE_SEARCH_API_KEY="..."
+DEFAULT_LLM_PROVIDER="openai"
+DEFAULT_LLM_MODEL="gpt-4.1-mini"
+DEEPSEEK_MODEL="deepseek-chat"
+```
 
 ## Core Idea
 
