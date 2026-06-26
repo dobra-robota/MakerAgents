@@ -8,10 +8,17 @@ opportunity folder.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from makeragents.schemas import Opportunity, OpportunityType, POCType, Verdict
+
+if TYPE_CHECKING:
+    from makeragents.llm.client import LLMClient
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # OpportunityType → POCType mapping
@@ -173,6 +180,153 @@ class CostCheckerAgent:
             cost_estimate_usd=usd,
             time_estimate=time_,
             risk_level=risk,
+            first_3_actions=actions,
+            notes=notes,
+        )
+
+    @staticmethod
+    def _build_opportunity_summary(opportunity: Opportunity) -> str:
+        """Build a plain-text summary of the opportunity for the LLM prompt."""
+        parts = [
+            f"Opportunity ID: {opportunity.id}",
+            f"Title: {opportunity.title}",
+            f"Type: {opportunity.type.value}",
+            f"Pain summary: {opportunity.pain_summary}",
+        ]
+        if opportunity.who_benefits:
+            parts.append(f"Who benefits: {', '.join(opportunity.who_benefits)}")
+        if opportunity.vulnerable_groups:
+            parts.append(
+                f"Vulnerable groups: {', '.join(opportunity.vulnerable_groups)}"
+            )
+        if opportunity.scores:
+            parts.append(f"Maker score: {opportunity.scores.maker_score}")
+            parts.append(f"Taker score: {opportunity.scores.taker_score}")
+        if opportunity.speculative:
+            parts.append("WARNING: This opportunity is speculative.")
+        return "\n".join(parts)
+
+    def run_with_llm(
+        self,
+        llm: LLMClient,
+        opportunity: Opportunity,
+        *,
+        city: str,
+        community: str,
+        verdict: str,
+        intervention_shape: str,
+    ) -> CostEstimate:
+        """Estimate POC cost using the LLM with the cost_checker prompt.
+
+        Falls back to the heuristic :meth:`estimate` if the LLM call
+        fails or returns unparseable output.
+
+        Args:
+            llm: An :class:`~makeragents.llm.client.LLMClient` instance.
+            opportunity: The opportunity to estimate costs for.
+            city: The run city (e.g. ``"Łodz"``).
+            community: The run community (e.g. ``"senior citizens"``).
+            verdict: The mediator verdict string.
+            intervention_shape: The mediator safe intervention shape.
+
+        Returns:
+            A :class:`CostEstimate` with LLM-generated estimates.
+        """
+        from makeragents.llm.client import ChatMessage
+        from makeragents.prompts import load_prompt
+
+        opportunity_summary = self._build_opportunity_summary(opportunity)
+
+        try:
+            prompt = load_prompt(
+                "cost_checker",
+                city=city,
+                community=community,
+                opportunity_summary=opportunity_summary,
+                verdict=verdict,
+                intervention_shape=intervention_shape,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "cost_checker prompt not found; falling back to heuristic estimate"
+            )
+            return self.estimate(opportunity)
+
+        try:
+            result = llm.chat_json(
+                [ChatMessage(role="user", content=prompt)],
+                temperature=0.3,
+            )
+        except Exception as exc:
+            logger.warning(
+                "LLM call failed for %s: %s; falling back to heuristic estimate",
+                opportunity.id,
+                exc,
+            )
+            return self.estimate(opportunity)
+
+        return self._parse_llm_response(result, opportunity)
+
+    def _parse_llm_response(
+        self,
+        result: dict,
+        opportunity: Opportunity,
+    ) -> CostEstimate:
+        """Parse the LLM JSON response into a :class:`CostEstimate`.
+
+        Falls back to the heuristic :meth:`estimate` if the response is
+        missing required fields or contains unrecognised values.
+        """
+        # Non-actionable verdicts → N/A cost, no POC recommended.
+        non_actionable = {"IGNORE", "DO_NOT_TOUCH", "NON_INTERVENTION"}
+        if result.get("cost_range", "") == "N/A":
+            return CostEstimate(
+                opportunity_id=opportunity.id,
+                poc_type=POCType.PUBLIC_GUIDE,
+                cost_estimate_usd="N/A",
+                time_estimate="N/A",
+                risk_level="N/A",
+                first_3_actions=[],
+                notes="Mediator verdict does not recommend a POC.",
+            )
+
+        try:
+            poc_type = POCType(result.get("poc_type", ""))
+        except (ValueError, KeyError):
+            logger.warning(
+                "Unrecognised poc_type %r in LLM response; falling back",
+                result.get("poc_type"),
+            )
+            return self.estimate(opportunity)
+
+        cost_range = result.get("cost_range", "")
+        time_est = result.get("time_est", "")
+        risk_level = result.get("risk_level", "medium")
+        first_actions = result.get("first_actions", [])
+
+        if not cost_range or not time_est or not isinstance(first_actions, list):
+            logger.warning(
+                "LLM response missing required fields; falling back"
+            )
+            return self.estimate(opportunity)
+
+        notes = ""
+        if opportunity.scores and opportunity.scores.maker_score < 30:
+            notes = "Low maker score — POC may not be justified."
+        elif opportunity.speculative:
+            notes = "Opportunity is speculative — validate evidence before investing."
+
+        # Take only the first 3 actions.
+        actions = first_actions[:3]
+        while len(actions) < 3:
+            actions.append("(additional action not provided by LLM)")
+
+        return CostEstimate(
+            opportunity_id=opportunity.id,
+            poc_type=poc_type,
+            cost_estimate_usd=cost_range,
+            time_estimate=time_est,
+            risk_level=risk_level,
             first_3_actions=actions,
             notes=notes,
         )
