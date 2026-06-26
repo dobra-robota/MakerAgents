@@ -12,14 +12,16 @@ produces:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from makeragents.run import slugify
 from makeragents.schemas import Verdict
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +70,10 @@ class LoadedOpportunity:
         """Extract rank_score from scores dict if present."""
         raw = self.scores.get("rank_score")
         if raw is not None:
-            return float(raw)
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return None
         return None
 
     @property
@@ -126,7 +131,7 @@ class ReportAgent:
         # Generate full report
         if not ranked:
             report_md = self._no_valid_opportunities_report(
-                metadata, run_path, evidence_index
+                metadata, run_path, evidence_index, rejected, incomplete
             )
         else:
             report_md = self._build_full_report(
@@ -226,7 +231,7 @@ class ReportAgent:
                         dict.fromkeys(loaded.evidence_ids + maker_data["evidence_ids"])
                     )
             except (json.JSONDecodeError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", maker_file)
 
         # Load taker.json
         taker_file = opp_dir / "taker.json"
@@ -238,7 +243,7 @@ class ReportAgent:
                     if key in taker_data:
                         loaded.scores[key] = taker_data[key]
             except (json.JSONDecodeError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", taker_file)
 
         # Load mediator.json
         mediator_file = opp_dir / "mediator.json"
@@ -258,7 +263,7 @@ class ReportAgent:
                     if key in med_data:
                         loaded.scores[key] = med_data[key]
             except (json.JSONDecodeError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", mediator_file)
 
         # Load cost.json
         cost_file = opp_dir / "cost.json"
@@ -272,7 +277,7 @@ class ReportAgent:
                 loaded.risk_level = cost_data.get("risk_level", "")
                 loaded.first_3_actions = cost_data.get("first_3_actions", [])
             except (json.JSONDecodeError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", cost_file)
 
         # Load status.yaml (optional, from issue #14)
         status_file = opp_dir / "status.yaml"
@@ -284,7 +289,7 @@ class ReportAgent:
                     if isinstance(incomplete, list):
                         loaded.status_incomplete_steps = incomplete
             except (yaml.YAMLError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", status_file)
 
         return loaded
 
@@ -309,7 +314,7 @@ class ReportAgent:
                     if eid:
                         index[eid] = items
             except (json.JSONDecodeError, OSError):
-                pass
+                logger.warning("Skipping corrupt file: %s", ev_file)
         return index
 
     # ------------------------------------------------------------------
@@ -584,7 +589,7 @@ class ReportAgent:
                 seen.add(eid)
                 ev = evidence_index.get(eid, {})
                 domain = ev.get("source_domain", "—")
-                trust = float(ev.get("trust_score", 0))
+                trust = float(ev.get("trust_score") or 0)
                 sources.append((eid, domain, trust))
 
         if not sources:
@@ -608,12 +613,16 @@ class ReportAgent:
         metadata: dict[str, Any],
         run_path: Path,
         evidence_index: dict[str, dict[str, Any]],
+        rejected: list[LoadedOpportunity] | None = None,
+        incomplete: list[LoadedOpportunity] | None = None,
     ) -> str:
         """Produce an explanatory report when no ranked opportunities exist."""
         city = metadata.get("city", "Unknown")
         community = metadata.get("community", "Unknown")
         timestamp = metadata.get("timestamp", "Unknown")
         run_id = metadata.get("run_id", "N/A")
+        rejected_count = len(rejected) if rejected else 0
+        incomplete_count = len(incomplete) if incomplete else 0
 
         lines: list[str] = [
             f"# Final Report: {city} / {community}",
@@ -624,6 +633,8 @@ class ReportAgent:
             f"- **City:** {city}",
             f"- **Community:** {community}",
             f"- **Generated:** {timestamp}",
+            f"- **Rejected opportunities:** {rejected_count}",
+            f"- **Incomplete opportunities:** {incomplete_count}",
             "",
             "### What was searched",
             "",

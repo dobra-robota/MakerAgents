@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from makeragents.agents.report import (
     _reject_reason,
 )
 from makeragents.cli import app
-from makeragents.schemas import Verdict
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +233,15 @@ def _make_full_opportunity(
 
 
 def _invoke_in(tmp_path: Path, *args: str):
-    """Invoke the CLI with the CWD set to tmp_path."""
-    cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        runner = CliRunner()
-        return runner.invoke(app, list(args))
-    finally:
-        os.chdir(cwd)
+    """Invoke the CLI, converting relative run paths to absolute."""
+    abs_args = []
+    for a in args:
+        if a.startswith("runs/"):
+            abs_args.append(str(tmp_path / a))
+        else:
+            abs_args.append(a)
+    runner = CliRunner()
+    return runner.invoke(app, abs_args)
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +820,7 @@ class TestCLIReportCommand:
     def test_report_command_missing_dir(self, tmp_path: Path) -> None:
         result = _invoke_in(tmp_path, "report", str(tmp_path / "nonexistent"))
         assert result.exit_code == 1
+        assert "not found" in result.output or "does not exist" in result.output
 
     def test_report_command_with_evidence(self, tmp_path: Path) -> None:
         run_dir = _make_run_dir(tmp_path)

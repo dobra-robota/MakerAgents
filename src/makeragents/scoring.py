@@ -6,6 +6,8 @@ by the Report Agent and other components that need to re-derive rankings.
 
 from __future__ import annotations
 
+from makeragents.schemas import ScoreSet
+
 
 def compute_low_harm_score(*, harm_risk_score: float) -> float:
     """Compute the low-harm score from the raw harm-risk score.
@@ -36,13 +38,11 @@ def compute_rank_score(
           (100 - harm_risk_score) * 0.14 +
           ability_to_act_score    * 0.12
     """
-    low_harm = 100.0 - harm_risk_score
-    return round(
-        people_helped_score * 0.22
-        + severity_score * 0.20
-        + validity_score * 0.18
-        + intervention_ease_score * 0.14
-        + low_harm * 0.14
-        + ability_to_act_score * 0.12,
-        2,
+    return ScoreSet.calculate_rank_score(
+        people_helped_score=people_helped_score,
+        severity_score=severity_score,
+        validity_score=validity_score,
+        intervention_ease_score=intervention_ease_score,
+        harm_risk_score=harm_risk_score,
+        ability_to_act_score=ability_to_act_score,
     )
