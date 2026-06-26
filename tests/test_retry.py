@@ -1,12 +1,9 @@
 """Tests for retry.py status tracking and CLI retry command."""
 
-import os
 from pathlib import Path
 
 import yaml
-from typer.testing import CliRunner
 
-from makeragents.cli import app
 from makeragents.retry import (
     PIPELINE_STEPS,
     STATUS_YAML_FILENAME,
@@ -16,18 +13,7 @@ from makeragents.retry import (
     read_status,
     write_status,
 )
-
-runner = CliRunner()
-
-
-def _invoke_in(tmp_path: Path, *args: str):
-    """Invoke the CLI app with *args* after chdir-ing to *tmp_path*."""
-    cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        return runner.invoke(app, list(args))
-    finally:
-        os.chdir(cwd)
+from tests.conftest import _invoke_in
 
 
 # ------------------------------------------------------------------ read_status
@@ -63,6 +49,16 @@ class TestReadStatus:
     def test_returns_default_when_dir_missing(self, tmp_path: Path) -> None:
         status = read_status(tmp_path / "no-such-dir")
         assert status["opportunity_id"] == "no-such-dir"
+        assert all(v == "incomplete" for v in status["steps"].values())
+
+    def test_returns_default_on_corrupt_yaml(self, tmp_path: Path) -> None:
+        opp_dir = tmp_path / "corrupt-opp"
+        opp_dir.mkdir()
+        (opp_dir / STATUS_YAML_FILENAME).write_text(
+            "{{{ invalid: yaml: :::", encoding="utf-8"
+        )
+        status = read_status(opp_dir)
+        assert status["opportunity_id"] == "corrupt-opp"
         assert all(v == "incomplete" for v in status["steps"].values())
 
 

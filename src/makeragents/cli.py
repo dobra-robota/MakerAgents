@@ -94,8 +94,7 @@ def retry(
         f"  Already complete: {', '.join(s for s in PIPELINE_STEPS if s not in incomplete)}"
     )
 
-    # In v0 the agent pipeline is not wired up, so "retry" just marks
-    # the incomplete steps as complete.
+    # TODO(#14): Wire up agent pipeline — currently just marks steps complete.
     updated = mark_steps_complete(status, incomplete)
     write_status(opp_dir, updated)
     typer.echo(

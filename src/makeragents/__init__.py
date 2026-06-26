@@ -35,7 +35,6 @@ __all__ = [
     "EvidenceType",
     "Opportunity",
     "OpportunityType",
-    "PIPELINE_STEPS",
     "POCType",
     "ProviderResponse",
     "RunMetadata",
