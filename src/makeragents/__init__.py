@@ -3,6 +3,16 @@
 from makeragents.agents.report import ReportAgent
 from makeragents.cli import app
 from makeragents.config import AppConfig, load_config
+from makeragents.overrides import (
+    UserOverride,
+    apply_score_overrides,
+    apply_trust_overrides,
+    apply_verdict_override,
+    format_override_markdown,
+    has_overrides,
+    parse_overrides,
+    strip_overrides,
+)
 from makeragents.retry import (
     PIPELINE_STEPS,
     get_incomplete_steps,
@@ -46,19 +56,27 @@ __all__ = [
     "SearchResult",
     "SourceRegistry",
     "SourceType",
+    "UserOverride",
     "Verdict",
     "app",
+    "apply_score_overrides",
+    "apply_trust_overrides",
+    "apply_verdict_override",
     "build_run_metadata",
     "compute_low_harm_score",
     "compute_rank_score",
     "create_run_folder",
+    "format_override_markdown",
     "get_incomplete_steps",
+    "has_overrides",
     "load_config",
     "load_registry",
     "mark_steps_complete",
+    "parse_overrides",
     "read_opportunity_state",
     "read_status",
     "slugify",
+    "strip_overrides",
     "write_status",
 ]
 
