@@ -14,8 +14,10 @@ class AppConfig(MakerAgentsModel):
 
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
+    # NOTE: keep in sync with .mise.toml
     default_llm_provider: str = "openai"
     default_llm_model: str | None = None
+    # NOTE: keep in sync with .mise.toml
     deepseek_model: str = "deepseek-chat"
     brave_search_api_key: str | None = None
 

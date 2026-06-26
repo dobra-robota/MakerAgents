@@ -1,27 +1,16 @@
+"""CLI integration tests (no API calls)."""
+
 import json
-import os
 from pathlib import Path
 
 import yaml
-from typer.testing import CliRunner
 
-from makeragents.cli import app
 from makeragents.sources.registry import (
     RUN_REGISTRY_RELATIVE_PATH,
     SourceRegistry,
     load_registry,
 )
-
-runner = CliRunner()
-
-
-def _invoke_in(tmp_path: Path, *args: str):
-    cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        return runner.invoke(app, list(args))
-    finally:
-        os.chdir(cwd)
+from tests.conftest import _invoke_in, app, runner
 
 
 # -- run ----------------------------------------------------------------------

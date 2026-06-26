@@ -9,16 +9,16 @@ from makeragents.agents.cost_checker import CostCheckerAgent, CostEstimate
 from makeragents.agents.report import ReportAgent
 
 __all__ = [
-    ConflictResult,
-    EvidenceAgent,
-    OpportunityAgent,
-    MakerAgent,
-    MakerResult,
-    TakerAgent,
-    TakerOutput,
-    MediatorAgent,
-    MediatorResult,
-    CostCheckerAgent,
-    CostEstimate,
-    ReportAgent,
+    "ConflictResult",
+    "CostCheckerAgent",
+    "CostEstimate",
+    "EvidenceAgent",
+    "MakerAgent",
+    "MakerResult",
+    "MediatorAgent",
+    "MediatorResult",
+    "OpportunityAgent",
+    "ReportAgent",
+    "TakerAgent",
+    "TakerOutput",
 ]
