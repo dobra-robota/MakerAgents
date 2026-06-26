@@ -4,6 +4,11 @@ The Taker Agent evaluates an opportunity purely through a defensive
 lens: it identifies exploitation risk, extraction risk, and harm
 potential **without providing exploitation instructions**.
 
+When an :class:`~makeragents.llm.client.LLMClient` is available,
+:meth:`run_with_llm` produces a generative exploitability-risk
+argument with disciplined claim classification and evidence citation
+per PRD §7.5 and §14.
+
 Usage
 -----
     taker = TakerAgent()
@@ -15,7 +20,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from makeragents.schemas import (
     ClaimClassification,
@@ -24,6 +29,9 @@ from makeragents.schemas import (
     Opportunity,
     ScoreSet,
 )
+
+if TYPE_CHECKING:
+    from makeragents.llm import LLMClient
 
 # Risk category keys required in TakerOutput.risk_breakdown.
 _RISK_CATEGORIES = (
@@ -66,6 +74,9 @@ class TakerOutput:
         Evidence IDs cited during analysis.
     summary : str
         Defensive summary of identified risks.
+    claims : list[dict[str, str]]
+        Individual risk observations with classification and
+        evidence citation (populated by LLM path).
     """
 
     def __init__(
@@ -77,6 +88,7 @@ class TakerOutput:
         risk_breakdown: dict[str, float],
         evidence_ids: list[str],
         summary: str,
+        claims: list[dict[str, str]] | None = None,
     ) -> None:
         self.opportunity_id = opportunity_id
         self.taker_score = taker_score
@@ -84,6 +96,7 @@ class TakerOutput:
         self.risk_breakdown = risk_breakdown
         self.evidence_ids = list(evidence_ids)
         self.summary = summary
+        self.claims = claims or []
 
         self._validate()
 
@@ -119,6 +132,7 @@ class TakerOutput:
             "risk_breakdown": dict(self.risk_breakdown),
             "evidence_ids": list(self.evidence_ids),
             "summary": self.summary,
+            "claims": list(self.claims),
         }
 
     def to_markdown(self) -> str:
@@ -149,6 +163,18 @@ class TakerOutput:
         for eid in self.evidence_ids:
             lines.append(f"- `{eid}`")
         lines.append("")
+        if self.claims:
+            lines += [
+                "## Claims",
+                "",
+            ]
+            for claim in self.claims:
+                cls = claim.get("classification", "unknown")
+                text = claim.get("text", "")
+                eid = claim.get("evidence_id", "")
+                eid_str = f" [`{eid}`]" if eid else ""
+                lines.append(f"- **[{cls}]**{eid_str} {text}")
+            lines.append("")
         lines.append(
             "---\n"
             "*This analysis was produced by the Taker Agent (defensive "
@@ -161,10 +187,26 @@ class TakerOutput:
 class TakerAgent:
     """Defensive red-team analysis for a single Opportunity.
 
-    The agent operates entirely through deterministic heuristics derived
-    from the opportunity's scores and linked evidence so that tests can
-    run without real LLM or API calls.
+    The deterministic ``analyze()`` path runs without LLM calls so
+    tests can execute fast. When an ``LLMClient`` is provided,
+    ``run_with_llm()`` produces a generative exploitability-risk
+    argument using prompt scaffolding from ``makeragents.prompts`` with
+    disciplined claim classification and evidence citation per PRD §14.
     """
+
+    _VALID_CLAIM_CLASSIFICATIONS: frozenset[str] = frozenset({
+        "evidence_based", "inference", "assumption", "unknown",
+    })
+    _VALID_CONFIDENCE_LEVELS: frozenset[str] = frozenset({
+        "low", "medium", "high",
+    })
+
+    def __init__(
+        self,
+        *,
+        llm_client: LLMClient | None = None,
+    ) -> None:
+        self._llm_client = llm_client
 
     def analyze(
         self,
@@ -440,6 +482,193 @@ class TakerAgent:
         )
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # LLM-backed analysis
+    # ------------------------------------------------------------------
+
+    def run_with_llm(
+        self,
+        opportunity: Opportunity,
+        evidence_items: list[EvidenceItem] | None = None,
+        *,
+        city: str = "",
+        community: str = "",
+        maker_summary: str = "",
+    ) -> TakerOutput:
+        """Run exploitability-risk analysis using the LLM provider.
+
+        Uses :func:`makeragents.prompts.load_prompt` and the configured
+        :class:`~makeragents.llm.client.LLMClient` to produce a
+        generative risk argument with disciplined claim classification
+        and evidence citation. Falls back to deterministic
+        :meth:`analyze` if no LLM client is configured or if the LLM
+        call fails.
+
+        Parameters
+        ----------
+        opportunity : Opportunity
+            The opportunity to analyse.
+        evidence_items : list[EvidenceItem] | None
+            Supporting evidence items.
+        city : str
+            City context for the prompt.
+        community : str
+            Community context for the prompt.
+        maker_summary : str
+            Maker agent's value-add argument (to evaluate for
+            exploitability).
+
+        Returns
+        -------
+        TakerOutput
+            The structured analysis result.
+        """
+        if evidence_items is None:
+            evidence_items = []
+
+        # Always compute deterministic result as a fallback.
+        deterministic = self.analyze(opportunity, evidence_items)
+
+        if self._llm_client is None:
+            return deterministic
+
+        # Build opportunity summary for the prompt.
+        opp_lines = [
+            f"ID: {opportunity.id}",
+            f"Title: {opportunity.title}",
+            f"Type: {opportunity.type.value}",
+            f"Pain: {opportunity.pain_summary}",
+            f"Who benefits: {', '.join(opportunity.who_benefits)}",
+        ]
+        if opportunity.vulnerable_groups:
+            opp_lines.append(
+                f"Vulnerable groups: {', '.join(opportunity.vulnerable_groups)}"
+            )
+        if opportunity.speculative:
+            opp_lines.append("⚠️ This opportunity is marked speculative.")
+        if evidence_items:
+            opp_lines.append("\nEvidence:")
+            for item in evidence_items:
+                opp_lines.append(
+                    f"- [{item.id}] ({item.claim_classification.value}) "
+                    f"{item.snippet[:200]}"
+                )
+        opportunity_summary = "\n".join(opp_lines)
+
+        try:
+            from makeragents.llm import ChatMessage
+            from makeragents.prompts import load_prompt
+
+            prompt = load_prompt(
+                "taker",
+                city=city,
+                community=community,
+                opportunity_summary=opportunity_summary,
+                maker_summary=maker_summary,
+            )
+
+            messages: list[ChatMessage] = []
+            messages.append(ChatMessage("system", prompt))
+            messages.append(
+                ChatMessage(
+                    "user",
+                    "Generate the taker risk analysis JSON as instructed.",
+                )
+            )
+
+            llm_result = self._llm_client.chat_json(messages)
+
+            return self._build_llm_result(
+                opportunity=opportunity,
+                deterministic=deterministic,
+                llm_result=llm_result,
+                evidence_items=evidence_items,
+            )
+        except Exception:
+            # Fall back to deterministic on any LLM failure.
+            return deterministic
+
+    def _build_llm_result(
+        self,
+        *,
+        opportunity: Opportunity,
+        deterministic: TakerOutput,
+        llm_result: dict[str, Any],
+        evidence_items: list[EvidenceItem],
+    ) -> TakerOutput:
+        """Build a :class:`TakerOutput` from the LLM's JSON response.
+
+        Validates claim classifications, filters unknown evidence IDs,
+        and merges the LLM risk argument with deterministic scores.
+        """
+        risk_summary = str(llm_result.get("risk_summary", ""))
+        score = llm_result.get("score")
+        confidence_raw = llm_result.get("confidence", "medium")
+
+        # Validate score range.
+        try:
+            score_val = float(score) if score is not None else deterministic.taker_score
+        except (ValueError, TypeError):
+            score_val = deterministic.taker_score
+        score_val = max(0.0, min(100.0, round(score_val, 1)))
+
+        # Validate confidence.
+        if (
+            isinstance(confidence_raw, str)
+            and confidence_raw.lower() in self._VALID_CONFIDENCE_LEVELS
+        ):
+            confidence = confidence_raw.lower()
+        else:
+            confidence = deterministic.taker_confidence
+
+        # Validate and collect claims.
+        raw_claims: list[dict[str, Any]] = (
+            llm_result.get("claims")
+            if isinstance(llm_result.get("claims"), list)
+            else []
+        )
+        claims: list[dict[str, str]] = []
+        for c in raw_claims:
+            if not isinstance(c, dict):
+                continue
+            text = str(c.get("text", ""))
+            cls_raw = str(c.get("classification", "")).lower()
+            eid = str(c.get("evidence_id", ""))
+            if cls_raw not in self._VALID_CLAIM_CLASSIFICATIONS:
+                cls_raw = "unknown"
+            claims.append({
+                "text": text,
+                "classification": cls_raw,
+                "evidence_id": eid,
+            })
+
+        # Collect evidence IDs from LLM (filter to known IDs).
+        known_ids = {ev.id for ev in evidence_items} | set(
+            opportunity.evidence_ids
+        )
+        llm_eids: list[str] = (
+            llm_result.get("evidence_ids")
+            if isinstance(llm_result.get("evidence_ids"), list)
+            else []
+        )
+        cited_ids = sorted(
+            {eid for eid in llm_eids if isinstance(eid, str) and eid in known_ids}
+            | set(deterministic.evidence_ids)
+        )
+
+        # Use LLM summary if provided, otherwise keep deterministic.
+        summary = risk_summary if risk_summary.strip() else deterministic.summary
+
+        return TakerOutput(
+            opportunity_id=opportunity.id,
+            taker_score=score_val,
+            taker_confidence=confidence,
+            risk_breakdown=dict(deterministic.risk_breakdown),
+            evidence_ids=cited_ids,
+            summary=summary,
+            claims=claims,
+        )
 
     # ------------------------------------------------------------------
     # Output persistence

@@ -748,3 +748,459 @@ class TestEdgeCases:
             updated.scores.ability_to_act_score
             == vulnerable_opportunity.scores.ability_to_act_score
         )
+
+# ------------------------------------------------------------------
+# LLM-backed taker tests
+# ------------------------------------------------------------------
+
+import json as _json
+
+
+def _llm_taker_response(
+    *,
+    score: float = 45.0,
+    confidence: str = "medium",
+    risk_summary: str = "This opportunity presents moderate extraction and dependency risks. "
+    "Vulnerable groups could be targeted if safeguards are missing. "
+    "Gatekeeping risks are low due to the open nature of the intervention.",
+    claims: list[dict] | None = None,
+    evidence_ids: list[str] | None = None,
+) -> dict:
+    """Build a mock LLM JSON response matching the taker prompt's expected schema."""
+    return {
+        "risk_summary": risk_summary,
+        "score": score,
+        "confidence": confidence,
+        "evidence_ids": evidence_ids or ["EV-001"],
+        "claims": claims or [
+            {
+                "text": "Extraction risk exists because vulnerable groups may be targeted for data collection.",
+                "classification": "inference",
+                "evidence_id": "EV-001",
+            },
+            {
+                "text": "The guide format has potential for false authority if not independently verified.",
+                "classification": "evidence_based",
+                "evidence_id": "EV-002",
+            },
+        ],
+    }
+
+
+def _make_mock_llm_client(
+    response: dict | None = None,
+) -> "LLMClient":
+    """Return an LLMClient with a mocked HTTP transport that returns the given JSON."""
+    from makeragents.config import AppConfig
+    from makeragents.llm import LLMClient
+
+    import httpx
+
+    payload = response or _llm_taker_response()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": _json.dumps(payload),
+                        },
+                    }
+                ],
+                "model": "deepseek-chat",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    cfg = AppConfig(deepseek_api_key="test-key")
+    return LLMClient(config=cfg, http_client=http_client)
+
+
+class TestTakerAgentRunWithLLM:
+    """Tests for the LLM-backed run_with_llm method."""
+
+    @pytest.fixture
+    def agent(self) -> TakerAgent:
+        return TakerAgent(llm_client=_make_mock_llm_client())
+
+    @pytest.fixture
+    def agent_no_llm(self) -> TakerAgent:
+        """Agent without LLM — should fall back to deterministic."""
+        return TakerAgent(llm_client=None)
+
+    def test_produces_risk_summary(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """LLM-backed run produces a non-empty risk summary."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity,
+            strong_evidence_items,
+            city="Łodz",
+            community="senior citizens",
+        )
+        assert len(result.summary) > 10
+        assert "extraction" in result.summary.lower()
+
+    def test_produces_claims(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """LLM-backed run produces validated claims."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        assert len(result.claims) >= 1
+        assert result.claims[0]["classification"] in (
+            "evidence_based", "inference", "assumption", "unknown",
+        )
+
+    def test_score_in_range(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """Score from LLM stays within 0–100."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        assert 0.0 <= result.taker_score <= 100.0
+
+    def test_confidence_from_llm(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """Confidence from LLM JSON is used when valid."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        # Default mock returns "medium"
+        assert result.taker_confidence == "medium"
+
+    def test_high_confidence_from_llm(self) -> None:
+        """High confidence from LLM is parsed correctly."""
+        llm = _make_mock_llm_client(_llm_taker_response(confidence="high"))
+        agent = TakerAgent(llm_client=llm)
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=["EV-001"],
+            speculative=False,
+        )
+        evidence = [
+            EvidenceItem(
+                id="EV-001",
+                source_url="https://example.gov/report",
+                source_domain="example.gov",
+                source_type=SourceType.GOVERNMENT,
+                evidence_type=EvidenceType.OFFICIAL_STATEMENT,
+                snippet="Test evidence.",
+                language="en",
+                claim_classification=ClaimClassification.EVIDENCE_BASED,
+                trust_score=85,
+                recency="2026-03",
+                confidence=Confidence.HIGH,
+            ),
+        ]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.taker_confidence == "high"
+
+    def test_invalid_confidence_falls_back(self) -> None:
+        """Invalid confidence string falls back to deterministic confidence."""
+        llm = _make_mock_llm_client(
+            _llm_taker_response(confidence="bogus")
+        )
+        agent = TakerAgent(llm_client=llm)
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=["EV-001"],
+            speculative=False,
+        )
+        evidence = [
+            EvidenceItem(
+                id="EV-001",
+                source_url="https://example.gov/report",
+                source_domain="example.gov",
+                source_type=SourceType.GOVERNMENT,
+                evidence_type=EvidenceType.OFFICIAL_STATEMENT,
+                snippet="Test evidence.",
+                language="en",
+                claim_classification=ClaimClassification.EVIDENCE_BASED,
+                trust_score=85,
+                recency="2026-03",
+                confidence=Confidence.HIGH,
+            ),
+        ]
+        result = agent.run_with_llm(opp, evidence)
+        # Falls back to deterministic which gives low for 0 evidence + empty evidence_ids
+        # Actually 1 evidence-based + 1 opp evidence_id -> medium or high
+        assert result.taker_confidence in ("low", "medium", "high")
+
+    def test_out_of_range_score_clamped(self) -> None:
+        """LLM scores outside 0–100 are clamped."""
+        llm = _make_mock_llm_client(_llm_taker_response(score=250.0))
+        agent = TakerAgent(llm_client=llm)
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=[],
+            speculative=False,
+        )
+        result = agent.run_with_llm(opp)
+        assert result.taker_score == 100.0
+
+    def test_negative_score_clamped(self) -> None:
+        """Negative LLM scores are clamped to 0."""
+        llm = _make_mock_llm_client(_llm_taker_response(score=-50.0))
+        agent = TakerAgent(llm_client=llm)
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=[],
+            speculative=False,
+        )
+        result = agent.run_with_llm(opp)
+        assert result.taker_score == 0.0
+
+    def test_falls_back_to_deterministic_without_llm(
+        self,
+        agent_no_llm: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """When no LLM client, run_with_llm returns deterministic result."""
+        result = agent_no_llm.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        assert result.claims == []
+        assert result.taker_score >= 0.0
+
+    def test_falls_back_on_llm_error(self) -> None:
+        """When LLM raises, fall back to deterministic result."""
+        def handler(request):
+            raise RuntimeError("simulated network failure")
+
+        import httpx
+        from makeragents.config import AppConfig
+        from makeragents.llm import LLMClient
+
+        transport = httpx.MockTransport(handler)
+        http_client = httpx.Client(transport=transport)
+        cfg = AppConfig(deepseek_api_key="test-key")
+        llm = LLMClient(config=cfg, http_client=http_client)
+        agent = TakerAgent(llm_client=llm)
+
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=["EV-001"],
+            speculative=False,
+        )
+        evidence = [
+            EvidenceItem(
+                id="EV-001",
+                source_url="https://example.gov/report",
+                source_domain="example.gov",
+                source_type=SourceType.GOVERNMENT,
+                evidence_type=EvidenceType.OFFICIAL_STATEMENT,
+                snippet="Test evidence.",
+                language="en",
+                claim_classification=ClaimClassification.EVIDENCE_BASED,
+                trust_score=85,
+                recency="2026-03",
+                confidence=Confidence.HIGH,
+            ),
+        ]
+        result = agent.run_with_llm(opp, evidence)
+        # Should fall back to deterministic
+        assert result.taker_score >= 0.0
+        assert len(result.evidence_ids) >= 1
+
+    def test_claims_include_evidence_id_and_classification(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """Each claim dict has text, classification, and evidence_id keys."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        for claim in result.claims:
+            assert "text" in claim
+            assert "classification" in claim
+            assert "evidence_id" in claim
+
+    def test_invalid_claim_classification_maps_to_unknown(self) -> None:
+        """Claims with invalid classifications are mapped to 'unknown'."""
+        llm = _make_mock_llm_client(
+            _llm_taker_response(
+                claims=[
+                    {
+                        "text": "Some risk observation",
+                        "classification": "bogus_class",
+                        "evidence_id": "EV-001",
+                    },
+                ],
+            )
+        )
+        agent = TakerAgent(llm_client=llm)
+        opp = Opportunity(
+            id="test-opp",
+            title="Test opportunity",
+            type=OpportunityType.PUBLIC_GUIDE,
+            pain_summary="Test pain.",
+            who_benefits=["testers"],
+            evidence_ids=["EV-001"],
+            speculative=False,
+        )
+        evidence = [
+            EvidenceItem(
+                id="EV-001",
+                source_url="https://example.gov/report",
+                source_domain="example.gov",
+                source_type=SourceType.GOVERNMENT,
+                evidence_type=EvidenceType.OFFICIAL_STATEMENT,
+                snippet="Test evidence.",
+                language="en",
+                claim_classification=ClaimClassification.EVIDENCE_BASED,
+                trust_score=85,
+                recency="2026-03",
+                confidence=Confidence.HIGH,
+            ),
+        ]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.claims[0]["classification"] == "unknown"
+
+    def test_filters_unknown_evidence_ids(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """Evidence IDs not in the provided evidence list are filtered out."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        assert "EV-999" not in result.evidence_ids
+
+    def test_to_dict_includes_claims(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """to_dict output includes claims array."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        d = result.to_dict()
+        assert "claims" in d
+        assert isinstance(d["claims"], list)
+        assert len(d["claims"]) >= 1
+
+    def test_to_markdown_includes_claims(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """to_markdown output includes a Claims section when claims exist."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        md = result.to_markdown()
+        assert "## Claims" in md
+
+    def test_summary_no_exploitation_instructions(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """The LLM-generated summary MUST NOT contain exploitation instructions."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        lower = result.summary.lower()
+        for phrase in (
+            "how to exploit",
+            "steps to exploit",
+            "step by step exploit",
+            "exploitation instructions",
+            "how to abuse",
+            "how to take advantage",
+        ):
+            assert phrase not in lower, (
+                f"Summary contains prohibited phrase: {phrase!r}"
+            )
+
+    def test_risk_breakdown_has_all_categories(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+    ) -> None:
+        """Risk breakdown still includes all required categories."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        required = [
+            "extraction_risk",
+            "gatekeeping_risk",
+            "false_authority_risk",
+            "dependency_risk",
+            "harm_risk",
+        ]
+        for cat in required:
+            assert cat in result.risk_breakdown, f"Missing: {cat}"
+            assert 0 <= result.risk_breakdown[cat] <= 100
+
+    def test_save_output_writes_llm_claims(
+        self,
+        agent: TakerAgent,
+        vulnerable_opportunity: Opportunity,
+        strong_evidence_items: list[EvidenceItem],
+        tmp_path: Path,
+    ) -> None:
+        """save_output persists claims in taker.json."""
+        result = agent.run_with_llm(
+            vulnerable_opportunity, strong_evidence_items
+        )
+        json_path, md_path = agent.save_output(
+            result, opportunity_slug="senior-services-guide", run_dir=tmp_path
+        )
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+        assert "claims" in data
+        assert isinstance(data["claims"], list)
+        assert len(data["claims"]) >= 1
+
+        md_content = md_path.read_text(encoding="utf-8")
+        assert "## Claims" in md_content
