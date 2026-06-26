@@ -49,7 +49,7 @@ OPENAI_API_KEY="sk-..."
 DEEPSEEK_API_KEY="sk-..."
 BRAVE_SEARCH_API_KEY="..."
 DEFAULT_LLM_PROVIDER="openai"
-DEFAULT_LLM_MODEL="gpt-4.1-mini"
+DEFAULT_LLM_MODEL="gpt-4o-mini"
 DEEPSEEK_MODEL="deepseek-chat"
 ```
 

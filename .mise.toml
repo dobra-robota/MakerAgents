@@ -1,16 +1,14 @@
 [tools]
 python = "3.12"
-uv = "latest"
+uv = "0.7.10"
 
 [env]
 # Load API keys from .env (do not commit secrets)
 _.file = ".env"
-OPENAI_API_KEY = ""
-DEEPSEEK_API_KEY = ""
-BRAVE_SEARCH_API_KEY = ""
-DEFAULT_LLM_PROVIDER = "openai"
-DEFAULT_LLM_MODEL = ""
-DEEPSEEK_MODEL = "deepseek-chat"
+# NOTE: keep in sync with config.py
+DEFAULT_LLM_PROVIDER = { default = "openai" }
+# NOTE: keep in sync with config.py
+DEEPSEEK_MODEL = { default = "deepseek-chat" }
 
 [tasks.test]
 description = "Run the test suite"
@@ -19,3 +17,11 @@ run = "uv run pytest"
 [tasks.sync]
 description = "Sync project dependencies"
 run = "uv sync"
+
+# [tasks.lint]
+# description = "Lint the codebase"
+# run = "uv run ruff check ."
+#
+# [tasks.format]
+# description = "Format the codebase"
+# run = "uv run ruff format ."
