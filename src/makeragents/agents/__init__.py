@@ -1,9 +1,5 @@
-"""Agent orchestration for MakerAgents research pipelines."""
+"""Agent implementations for the MakerAgents research pipeline."""
 
-from makeragents.agents.research import ResearchAgent, ResearchQueryResult, SearchResultsOutput
+from makeragents.agents.evidence import ConflictResult, EvidenceAgent
 
-__all__ = [
-    "ResearchAgent",
-    "ResearchQueryResult",
-    "SearchResultsOutput",
-]
+__all__ = [ConflictResult, EvidenceAgent]
