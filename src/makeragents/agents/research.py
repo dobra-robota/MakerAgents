@@ -9,18 +9,28 @@ The :class:`ResearchAgent` is the first agent in the pipeline. It:
 3. Stores raw search results as JSON files under the run folder's sources/
    directory.
 4. Returns structured output for downstream agents.
+
+When an :class:`~makeragents.llm.LLMClient` is available the agent can
+generate queries via the LLM-backed :meth:`llm_generate_queries`, which
+uses the research prompt from :mod:`makeragents.prompts`.  The
+heuristic :meth:`generate_queries` remains as a fallback.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pathlib import Path
 
 from makeragents.config import AppConfig, load_config
+from makeragents.llm import ChatMessage, LLMClient, LLMClientError
+from makeragents.prompts import load_prompt
 from makeragents.schemas import MakerAgentsModel
 from makeragents.search.client import ProviderResponse, SearchClient
 from makeragents.search.providers import SearchResult
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # City → language mapping — a small, auditable dictionary for v0.
@@ -118,12 +128,14 @@ class ResearchAgent:
         self,
         *,
         search_client: SearchClient | None = None,
+        llm_client: LLMClient | None = None,
         config: AppConfig | None = None,
     ) -> None:
         cfg = config if config is not None else load_config()
         self._search_client = (
             search_client if search_client is not None else SearchClient(config=cfg)
         )
+        self._llm_client = llm_client
 
     @staticmethod
     def _normalize_city(city: str) -> str:
@@ -192,6 +204,63 @@ class ResearchAgent:
 
         return queries
 
+    def llm_generate_queries(
+        self,
+        city: str,
+        community: str,
+        *,
+        max_queries: int = 10,
+        temperature: float = 0.3,
+    ) -> list[str]:
+        """Generate search queries using the LLM and the research prompt.
+
+        Uses :func:`makeragents.prompts.load_prompt` to load the research
+        Markdown prompt template, fills in ``city``, ``community``, and
+        ``max_queries``, then calls the LLM with ``chat_json`` to get a
+        structured ``{"queries": [...]}`` response.
+
+        Falls back to :meth:`generate_queries` if no LLM client is
+        configured or if the LLM call fails.
+
+        Args:
+            city: The city being researched.
+            community: The community being researched.
+            max_queries: Maximum number of queries to generate.
+            temperature: LLM sampling temperature.
+
+        Returns:
+            A list of search query strings.
+        """
+        if self._llm_client is None:
+            _logger.info(
+                "No LLM client configured — falling back to heuristic queries"
+            )
+            return self.generate_queries(city, community)
+
+        try:
+            prompt = load_prompt(
+                "research",
+                city=city,
+                community=community,
+                max_queries=str(max_queries),
+            )
+            messages = [ChatMessage("system", prompt)]
+            result = self._llm_client.chat_json(
+                messages, temperature=temperature
+            )
+            queries: list[str] = list(result.get("queries", []))
+            if not queries:
+                raise ValueError("LLM returned an empty queries list")
+            # Truncate to max_queries in case the model returns extra
+            return queries[:max_queries]
+        except (LLMClientError, ValueError, KeyError) as exc:
+            _logger.warning(
+                "LLM query generation failed (%s) — "
+                "falling back to heuristic queries",
+                exc,
+            )
+            return self.generate_queries(city, community)
+
     def search(
         self,
         run_dir: str | Path,
@@ -204,7 +273,9 @@ class ResearchAgent:
         """Execute a research search pass and persist results.
 
         Steps:
-            1. Generate search queries via :meth:`generate_queries`.
+            1. Generate search queries via :meth:`llm_generate_queries`
+               (which falls back to :meth:`generate_queries` when no LLM
+               client is available or the call fails).
             2. Slice the query list to ``queries_per_run``.
             3. Run each query through the configured :class:`SearchClient`,
                requesting ``results_per_query`` results.
@@ -226,7 +297,9 @@ class ResearchAgent:
         Returns:
             A :class:`SearchResultsOutput` containing every query result.
         """
-        all_queries = self.generate_queries(city, community)
+        all_queries = self.llm_generate_queries(
+            city, community, max_queries=queries_per_run
+        )
         selected = all_queries[:queries_per_run]
         query_results: list[ResearchQueryResult] = []
 
