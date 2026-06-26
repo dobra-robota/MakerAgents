@@ -206,3 +206,260 @@ class TestMakerResult:
         assert d["opportunity_id"] == "OPP-1"
         assert d["maker_score"] == 75.0
         assert d["maker_confidence"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# LLM-backed run_with_llm tests (mocked, no live API calls)
+# ---------------------------------------------------------------------------
+
+
+import json as _json
+
+
+def _llm_maker_response(
+    *,
+    score: float = 75.0,
+    confidence: str = "medium",
+    value_add_summary: str = "A well-designed intervention would add genuine value.",
+    claims: list[dict] | None = None,
+    evidence_ids: list[str] | None = None,
+) -> dict:
+    """Build a mock LLM JSON response matching the maker prompt's expected schema."""
+    return {
+        "value_add_summary": value_add_summary,
+        "score": score,
+        "confidence": confidence,
+        "evidence_ids": evidence_ids or ["EVID-001"],
+        "claims": claims or [
+            {
+                "text": "A specific observation about community pain",
+                "classification": "evidence_based",
+                "evidence_id": "EVID-001",
+            },
+            {
+                "text": "An inference about root causes",
+                "classification": "inference",
+                "evidence_id": "EVID-001",
+            },
+        ],
+    }
+
+
+def _make_mock_llm_client(
+    response: dict | None = None,
+) -> "LLMClient":
+    """Return an LLMClient with a mocked HTTP transport that returns the given JSON."""
+    from makeragents.config import AppConfig
+    from makeragents.llm import LLMClient
+
+    import httpx
+
+    payload = response or _llm_maker_response()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": _json.dumps(payload),
+                        },
+                    }
+                ],
+                "model": "deepseek-chat",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    cfg = AppConfig(deepseek_api_key="test-key")
+    return LLMClient(config=cfg, http_client=http_client)
+
+
+class TestMakerAgentRunWithLLM:
+    @pytest.fixture
+    def agent(self) -> MakerAgent:
+        return MakerAgent(llm_client=_make_mock_llm_client())
+
+    @pytest.fixture
+    def agent_no_llm(self) -> MakerAgent:
+        """Agent without LLM — should fall back to deterministic."""
+        return MakerAgent(llm_client=None)
+
+    def test_produces_value_add_argument(self, agent: MakerAgent) -> None:
+        """LLM-backed run produces a non-empty value_add_argument."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence, city="Łodz", community="seniors")
+        assert result.value_add_argument != ""
+        assert "well-designed intervention" in result.value_add_argument.lower()
+
+    def test_produces_claims(self, agent: MakerAgent) -> None:
+        """LLM-backed run produces validated claims."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert len(result.claims) >= 1
+        assert result.claims[0]["classification"] in (
+            "evidence_based", "inference", "assumption", "unknown",
+        )
+
+    def test_score_in_range(self, agent: MakerAgent) -> None:
+        """Score from LLM stays within 0–100."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert 0.0 <= result.maker_score <= 100.0
+
+    def test_confidence_from_llm(self, agent: MakerAgent) -> None:
+        """Confidence from LLM JSON is used when valid."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        # Default mock returns "medium"
+        assert result.maker_confidence == Confidence.MEDIUM
+
+    def test_high_confidence_from_llm(self) -> None:
+        """High confidence from LLM is parsed correctly."""
+        llm = _make_mock_llm_client(_llm_maker_response(confidence="high"))
+        agent = MakerAgent(llm_client=llm)
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.maker_confidence == Confidence.HIGH
+
+    def test_invalid_confidence_falls_back(self) -> None:
+        """Invalid confidence string falls back to deterministic confidence."""
+        llm = _make_mock_llm_client(_llm_maker_response(confidence="bogus"))
+        agent = MakerAgent(llm_client=llm)
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        # Deterministic with 1 HIGH evidence should yield HIGH confidence
+        assert result.maker_confidence == Confidence.HIGH
+
+    def test_filters_unknown_evidence_ids(self, agent: MakerAgent) -> None:
+        """Evidence IDs not in the provided evidence list are filtered out."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        # LLM may cite EVID-001 but not EVID-999
+        assert "EVID-999" not in result.evidence_ids
+
+    def test_claims_include_evidence_id_and_classification(self, agent: MakerAgent) -> None:
+        """Each claim dict has text, classification, and evidence_id keys."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        for claim in result.claims:
+            assert "text" in claim
+            assert "classification" in claim
+            assert "evidence_id" in claim
+
+    def test_invalid_claim_classification_maps_to_unknown(self) -> None:
+        """Claims with invalid classifications are mapped to 'unknown'."""
+        llm = _make_mock_llm_client(_llm_maker_response(
+            claims=[
+                {
+                    "text": "Some claim",
+                    "classification": "bogus_class",
+                    "evidence_id": "EVID-001",
+                },
+            ],
+        ))
+        agent = MakerAgent(llm_client=llm)
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.claims[0]["classification"] == "unknown"
+
+    def test_out_of_range_score_clamped(self) -> None:
+        """LLM scores outside 0–100 are clamped."""
+        llm = _make_mock_llm_client(_llm_maker_response(score=250.0))
+        agent = MakerAgent(llm_client=llm)
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.maker_score == 100.0
+
+    def test_negative_score_clamped(self) -> None:
+        llm = _make_mock_llm_client(_llm_maker_response(score=-50.0))
+        agent = MakerAgent(llm_client=llm)
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        assert result.maker_score == 0.0
+
+    def test_falls_back_to_deterministic_without_llm(self, agent_no_llm: MakerAgent) -> None:
+        """When no LLM client, run_with_llm returns deterministic result."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent_no_llm.run_with_llm(opp, evidence)
+        assert result.value_add_argument == ""
+        assert result.claims == []
+
+    def test_falls_back_on_llm_error(self) -> None:
+        """When LLM raises, fall back to deterministic result."""
+        def handler(request):
+            raise RuntimeError("simulated network failure")
+
+        import httpx
+        from makeragents.config import AppConfig
+        from makeragents.llm import LLMClient
+
+        transport = httpx.MockTransport(handler)
+        http_client = httpx.Client(transport=transport)
+        cfg = AppConfig(deepseek_api_key="test-key")
+        llm = LLMClient(config=cfg, http_client=http_client)
+        agent = MakerAgent(llm_client=llm)
+
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        # Should fall back to deterministic
+        assert result.maker_score >= 0.0
+        assert result.evidence_ids == ["EVID-001"]
+
+    def test_value_add_in_markdown(self, agent: MakerAgent, tmp_path: Path) -> None:
+        """maker.md includes the value-add argument section."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        _, md_path = agent.save_output(result, tmp_path)
+        content = md_path.read_text()
+        assert "## Value-Add Argument" in content
+        assert "well-designed intervention" in content.lower()
+
+    def test_claims_in_markdown(self, agent: MakerAgent, tmp_path: Path) -> None:
+        """maker.md includes a claims table."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        _, md_path = agent.save_output(result, tmp_path)
+        content = md_path.read_text()
+        assert "## Claims" in content
+        assert "evidence_based" in content
+
+    def test_value_add_in_json(self, agent: MakerAgent, tmp_path: Path) -> None:
+        """maker.json includes value_add_argument and claims."""
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run_with_llm(opp, evidence)
+        json_path, _ = agent.save_output(result, tmp_path)
+        data = _json.loads(json_path.read_text())
+        assert "value_add_argument" in data
+        assert data["value_add_argument"] != ""
+        assert "claims" in data
+        assert len(data["claims"]) >= 1
+
+    def test_deterministic_still_works_as_before(self) -> None:
+        """Existing run() method still works without LLM."""
+        agent = MakerAgent()
+        opp = _make_opportunity(evidence_ids=["EVID-001"])
+        evidence = [_make_evidence(id_="EVID-001")]
+        result = agent.run(opp, evidence)
+        assert result.maker_score > 0.0
+        assert result.value_add_argument == ""
+        assert result.claims == []

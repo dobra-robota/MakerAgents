@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from makeragents.schemas import (
     ClaimClassification,
@@ -22,7 +22,7 @@ from makeragents.schemas import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from makeragents.llm import LLMClient
 
 # ---------------------------------------------------------------------------
 # Scoring weights for the maker_score composite
@@ -35,6 +35,17 @@ _W_VALIDITY = 0.20
 _W_LOW_HARM = 0.175
 _W_EASE = 0.14
 _W_ABILITY = 0.11
+
+# Valid claim classifications
+_VALID_CLAIM_CLASSIFICATIONS: set[str] = {
+    "evidence_based",
+    "inference",
+    "assumption",
+    "unknown",
+}
+
+# Valid confidence levels
+_VALID_CONFIDENCE_LEVELS: set[str] = {"low", "medium", "high"}
 
 
 def _count_high_confidence(items: list[EvidenceItem]) -> int:
@@ -65,6 +76,8 @@ class MakerResult:
     claim_classifications: dict[str, str] = field(default_factory=dict)
     evidence_ids: list[str] = field(default_factory=list)
     summary: str = ""
+    value_add_argument: str = ""
+    claims: list[dict[str, str]] = field(default_factory=list)
 
     def to_json_dict(self) -> dict:
         return {
@@ -82,15 +95,26 @@ class MakerResult:
             "claim_classifications": self.claim_classifications,
             "evidence_ids": self.evidence_ids,
             "summary": self.summary,
+            "value_add_argument": self.value_add_argument,
+            "claims": self.claims,
         }
 
 
 class MakerAgent:
     """Creates the value-add argument and assigns Maker scores.
 
-    Deterministic scoring is used (no LLM calls) based on opportunity
-    metadata and supporting evidence characteristics.
+    Deterministic scoring is used by default via ``run()`` (no LLM).
+    When an ``LLMClient`` is provided, ``run_with_llm()`` generates a
+    genuinely generative value-add argument with disciplined claim
+    classification and evidence citation per PRD §7.4.
     """
+
+    def __init__(
+        self,
+        *,
+        llm_client: LLMClient | None = None,
+    ) -> None:
+        self._llm_client = llm_client
 
     # ------------------------------------------------------------------
     # Public API
@@ -162,6 +186,89 @@ class MakerAgent:
             evidence_ids=evidence_ids,
             summary=summary,
         )
+
+    def run_with_llm(
+        self,
+        opportunity: Opportunity,
+        evidence: list[EvidenceItem],
+        *,
+        city: str = "",
+        community: str = "",
+    ) -> MakerResult:
+        """Score an opportunity using LLM-backed value-add argument generation.
+
+        Uses ``load_prompt`` and the configured ``LLMClient`` to produce
+        a genuinely generative value-add argument with disciplined claim
+        classification and evidence citation. Falls back to deterministic
+        ``run()`` if no LLM client is configured or if the LLM call fails.
+        """
+        # Gather cited evidence
+        cited = self._cited_evidence(opportunity, evidence)
+        evidence_ids = [item.id for item in cited]
+        evidence_ids_set = set(evidence_ids)
+
+        # Start with deterministic scores as the base
+        deterministic = self.run(opportunity, evidence)
+
+        if self._llm_client is None:
+            return deterministic
+
+        # Build opportunity summary for the prompt
+        opp_summary_lines = [
+            f"ID: {opportunity.id}",
+            f"Title: {opportunity.title}",
+            f"Type: {opportunity.type.value}",
+            f"Pain: {opportunity.pain_summary}",
+            f"Who benefits: {', '.join(opportunity.who_benefits)}",
+        ]
+        if opportunity.vulnerable_groups:
+            opp_summary_lines.append(
+                f"Vulnerable groups: {', '.join(opportunity.vulnerable_groups)}"
+            )
+        if opportunity.speculative:
+            opp_summary_lines.append("⚠️ This opportunity is marked speculative.")
+        if cited:
+            opp_summary_lines.append("\nEvidence:")
+            for item in cited:
+                opp_summary_lines.append(
+                    f"- [{item.id}] ({item.claim_classification.value}) "
+                    f"{item.snippet[:200]}"
+                )
+        opportunity_summary = "\n".join(opp_summary_lines)
+
+        try:
+            from makeragents.prompts import load_prompt
+
+            prompt = load_prompt(
+                "maker",
+                city=city,
+                community=community,
+                opportunity_summary=opportunity_summary,
+            )
+
+            messages: list = []
+            from makeragents.llm import ChatMessage
+
+            messages.append(ChatMessage("system", prompt))
+            messages.append(
+                ChatMessage(
+                    "user",
+                    "Generate the maker argument JSON as instructed.",
+                )
+            )
+
+            llm_result = self._llm_client.chat_json(messages)
+
+            # Validate and extract structured output
+            return self._build_llm_result(
+                opportunity=opportunity,
+                deterministic=deterministic,
+                llm_result=llm_result,
+                evidence_ids_set=evidence_ids_set,
+            )
+        except Exception:
+            # Fall back to deterministic on any LLM failure
+            return deterministic
 
     def save_output(
         self,
@@ -265,6 +372,100 @@ class MakerAgent:
     # Output formatting
     # ------------------------------------------------------------------
 
+    def _build_llm_result(
+        self,
+        *,
+        opportunity: Opportunity,
+        deterministic: MakerResult,
+        llm_result: dict[str, Any],
+        evidence_ids_set: set[str],
+    ) -> MakerResult:
+        """Build a :class:`MakerResult` from the LLM's JSON output.
+
+        Validates claim classifications, filters unknown evidence IDs,
+        and merges the LLM value-add argument with deterministic scores.
+        """
+        value_add_arg = str(llm_result.get("value_add_summary", ""))
+        score = llm_result.get("score")
+        confidence_raw = llm_result.get("confidence", "medium")
+
+        # Validate score range
+        try:
+            score_val = float(score) if score is not None else deterministic.maker_score
+        except (ValueError, TypeError):
+            score_val = deterministic.maker_score
+        score_val = max(0.0, min(100.0, score_val))
+
+        # Validate confidence
+        if (
+            isinstance(confidence_raw, str)
+            and confidence_raw.lower() in _VALID_CONFIDENCE_LEVELS
+        ):
+            confidence = Confidence(confidence_raw.lower())
+        else:
+            confidence = deterministic.maker_confidence
+
+        # Validate and collect claims
+        raw_claims: list[dict[str, Any]] = (
+            llm_result.get("claims")
+            if isinstance(llm_result.get("claims"), list)
+            else []
+        )
+        claims: list[dict[str, str]] = []
+        for c in raw_claims:
+            if not isinstance(c, dict):
+                continue
+            text = str(c.get("text", ""))
+            cls_raw = str(c.get("classification", "")).lower()
+            eid = str(c.get("evidence_id", ""))
+            if cls_raw not in _VALID_CLAIM_CLASSIFICATIONS:
+                cls_raw = "unknown"
+            claims.append({
+                "text": text,
+                "classification": cls_raw,
+                "evidence_id": eid,
+            })
+
+        # Collect evidence IDs from LLM (filter to known IDs)
+        llm_eids: list[str] = (
+            llm_result.get("evidence_ids")
+            if isinstance(llm_result.get("evidence_ids"), list)
+            else []
+        )
+        cited_ids = [
+            eid for eid in llm_eids if isinstance(eid, str) and eid in evidence_ids_set
+        ]
+
+        # Build claim classifications from claims
+        claim_classifications: dict[str, str] = {}
+        for claim in claims:
+            eid = claim.get("evidence_id", "")
+            if eid:
+                claim_classifications[eid] = claim["classification"]
+
+        summary = self._build_summary(
+            opportunity, score_val, confidence, cited_ids
+        )
+
+        return MakerResult(
+            opportunity_id=opportunity.id,
+            maker_score=score_val,
+            maker_confidence=confidence,
+            people_helped_score=deterministic.people_helped_score,
+            severity_score=deterministic.severity_score,
+            impact_score=deterministic.impact_score,
+            validity_score=deterministic.validity_score,
+            intervention_ease_score=deterministic.intervention_ease_score,
+            harm_risk_score=deterministic.harm_risk_score,
+            ability_to_act_score=deterministic.ability_to_act_score,
+            rank_score=deterministic.rank_score,
+            claim_classifications=claim_classifications,
+            evidence_ids=cited_ids,
+            summary=summary,
+            value_add_argument=value_add_arg,
+            claims=claims,
+        )
+
     def _build_summary(
         self,
         opp: Opportunity,
@@ -294,6 +495,33 @@ class MakerAgent:
             "",
             result.summary,
             "",
+        ]
+
+        # Include LLM-generated value-add argument if present
+        if result.value_add_argument:
+            lines.extend([
+                "## Value-Add Argument",
+                "",
+                result.value_add_argument,
+                "",
+            ])
+
+        # Include claims table if present
+        if result.claims:
+            lines.extend([
+                "## Claims",
+                "",
+                "| Claim | Classification | Evidence ID |",
+                "|-------|----------------|-------------|",
+            ])
+            for claim in result.claims:
+                text = claim.get("text", "").replace("|", "\\|")
+                cls_ = claim.get("classification", "")
+                eid = claim.get("evidence_id", "")
+                lines.append(f"| {text} | {cls_} | `{eid}` |")
+            lines.append("")
+
+        lines.extend([
             "## Scores",
             "",
             "| Score | Value |",
@@ -311,7 +539,7 @@ class MakerAgent:
             "",
             "## Claim Classification",
             "",
-        ]
+        ])
         for eid, cls in result.claim_classifications.items():
             lines.append(f"- `{eid}`: {cls}")
 
