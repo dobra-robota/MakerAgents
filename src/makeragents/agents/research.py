@@ -19,6 +19,7 @@ heuristic :meth:`generate_queries` remains as a fallback.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from pathlib import Path
@@ -103,6 +104,7 @@ class ResearchQueryResult(MakerAgentsModel):
     """A single query and its provider response."""
 
     query: str
+    language: str = "en"
     provider: str
     results_count: int
     results: list[SearchResult]
@@ -154,6 +156,30 @@ class ResearchAgent:
         if "en" not in languages:
             languages = ["en", *languages]
         return languages
+
+    @staticmethod
+    def _infer_query_language(query: str, city: str) -> str:
+        """Infer the language code of a query from its content.
+
+        Heuristic queries tag local-language variants with
+        ``[language_name]`` (e.g. ``[polish]``).  LLM-generated queries
+        are expected to use ``[lang_code]`` prefixes (e.g. ``[pl]``)
+        per the research prompt.
+
+        Falls back to ``"en"`` when no tag is detected.
+        """
+        query_lower = query.lower()
+        # Check for [language_code] tags (e.g. [pl], [de])
+        tag_match = re.search(r"\[([a-z]{2})\]", query_lower)
+        if tag_match:
+            code = tag_match.group(1)
+            if code in _LANGUAGE_NAMES:
+                return code
+        # Check for [language_name] tags (e.g. [polish], [german])
+        for code, name in _LANGUAGE_NAMES.items():
+            if f"[{name.lower()}]" in query_lower:
+                return code
+        return "en"
 
     @staticmethod
     def generate_queries(city: str, community: str) -> list[str]:
@@ -238,17 +264,33 @@ class ResearchAgent:
             return self.generate_queries(city, community)
 
         try:
+            languages = self._languages_for_city(city)
+            language_names = ", ".join(
+                f"{_LANGUAGE_NAMES.get(l, l)} ({l})" for l in languages
+            )
             prompt = load_prompt(
                 "research",
                 city=city,
                 community=community,
                 max_queries=str(max_queries),
+                languages=language_names,
             )
             messages = [ChatMessage("system", prompt)]
             result = self._llm_client.chat_json(
                 messages, temperature=temperature
             )
-            queries: list[str] = list(result.get("queries", []))
+            raw_queries = result.get("queries", [])
+            if not raw_queries:
+                raise ValueError("LLM returned an empty queries list")
+            # Parse queries — support both dict format (with language)
+            # and plain string format (legacy / fallback).
+            queries: list[str] = []
+            for item in raw_queries:
+                if isinstance(item, dict):
+                    queries.append(item.get("query", ""))
+                elif isinstance(item, str):
+                    queries.append(item)
+            queries = [q for q in queries if q]
             if not queries:
                 raise ValueError("LLM returned an empty queries list")
             # Truncate to max_queries in case the model returns extra
@@ -304,12 +346,14 @@ class ResearchAgent:
         query_results: list[ResearchQueryResult] = []
 
         for query in selected:
+            language = self._infer_query_language(query, city)
             response: ProviderResponse = self._search_client.search(
                 query, count=results_per_query
             )
             query_results.append(
                 ResearchQueryResult(
                     query=query,
+                    language=language,
                     provider=response.provider,
                     results_count=len(response.results),
                     results=list(response.results),
