@@ -8,6 +8,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from makeragents.scoring import compute_low_harm_score, compute_rank_score
+
 NonEmptyString = Annotated[str, Field(min_length=1)]
 ScoreValue = Annotated[float, Field(ge=0, le=100)]
 
@@ -155,17 +157,18 @@ class ScoreSet(MakerAgentsModel):
         harm_risk_score: float,
         ability_to_act_score: float,
     ) -> float:
-        """Calculate the documented ranking score from component scores."""
+        """Calculate the documented ranking score from component scores.
 
-        low_harm_score = 100 - harm_risk_score
-        return round(
-            people_helped_score * 0.22
-            + severity_score * 0.20
-            + validity_score * 0.18
-            + intervention_ease_score * 0.14
-            + low_harm_score * 0.14
-            + ability_to_act_score * 0.12,
-            2,
+        Delegates to the pure ``makeragents.scoring.compute_rank_score``
+        function so that the formula lives in a single, testable location.
+        """
+        return compute_rank_score(
+            people_helped_score=people_helped_score,
+            severity_score=severity_score,
+            validity_score=validity_score,
+            intervention_ease_score=intervention_ease_score,
+            harm_risk_score=harm_risk_score,
+            ability_to_act_score=ability_to_act_score,
         )
 
 

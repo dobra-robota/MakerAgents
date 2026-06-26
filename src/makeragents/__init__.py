@@ -16,6 +16,7 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.scoring import compute_low_harm_score, compute_rank_score
 from makeragents.search import ProviderResponse, SearchClient, SearchResult
 from makeragents.sources import SourceRegistry, load_registry
 
@@ -38,6 +39,8 @@ __all__ = [
     "Verdict",
     "app",
     "build_run_metadata",
+    "compute_low_harm_score",
+    "compute_rank_score",
     "create_run_folder",
     "load_config",
     "load_registry",
