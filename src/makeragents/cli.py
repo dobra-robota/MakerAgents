@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
+from makeragents.agents.report import ReportAgent
 from makeragents.run import build_run_metadata, create_run_folder
+from makeragents.schemas import ScoreValue
+from makeragents.sources.registry import (
+    RUN_REGISTRY_RELATIVE_PATH,
+    SourceRegistry,
+    load_registry,
+)
 
 app = typer.Typer(help="MakerAgents command-line interface.", no_args_is_help=True)
+
+# -- sub-command groups -------------------------------------------------------
+
+sources_app = typer.Typer(help="Inspect and manage source trust registries.")
+app.add_typer(sources_app, name="sources")
 
 
 @app.callback()
 def main() -> None:
     """MakerAgents command-line interface."""
+
+
+# -- run ----------------------------------------------------------------------
 
 
 @app.command()
@@ -33,6 +50,129 @@ def run(
     )
     run_dir = create_run_folder(metadata)
     typer.echo(f"Created run folder: {run_dir}")
+
+
+# -- report -------------------------------------------------------------------
+
+
+@app.command()
+def report(
+    run_path: str = typer.Argument(
+        ..., help="Path to the run directory, e.g. 'runs/20250626-120000-lodz-senior-citizens'."
+    ),
+) -> None:
+    """Re-render final-report.md from on-disk run state.
+
+    This reads existing run artifacts (run.yaml, source registry, evidence
+    items, and opportunities) and regenerates final-report.md without
+    calling any agents or search providers.
+    """
+    agent = ReportAgent(run_path)
+    dest = agent.write_report()
+    typer.echo(f"Report written: {dest}")
+
+
+# -- sources ------------------------------------------------------------------
+
+
+@sources_app.command(name="list")
+def sources_list(
+    run: str | None = typer.Option(
+        None,
+        "--run",
+        help="Run directory whose source registry to list "
+        "(default: packaged registry).",
+    ),
+) -> None:
+    """List known sources and their trust scores."""
+    _print_registry(_resolve_registry(run))
+
+
+@sources_app.command(name="trust")
+def sources_trust(
+    domain: str = typer.Argument(..., help="Domain to set a trust score for."),
+    score: int = typer.Option(
+        ..., "--score", min=0, max=100, help="Trust score (0-100)."
+    ),
+    run: str | None = typer.Option(
+        None,
+        "--run",
+        help="Run directory whose source registry to update.",
+    ),
+) -> None:
+    """Set or override a domain's trust score in the registry.
+
+    Requires ``--run`` to target a specific run's registry.  Without
+    ``--run`` an error is shown.
+    """
+    if not run:
+        typer.echo(
+            "Error: --run is required.  Provide the run directory path to "
+            "update its source registry (e.g. --run runs/<run-id>).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    run_dir = Path(run)
+    registry_path = run_dir / RUN_REGISTRY_RELATIVE_PATH
+    try:
+        registry = load_registry(registry_path if registry_path.is_file() else None)
+    except FileNotFoundError:
+        # No registry file yet — start from the packaged default.
+        registry = load_registry()
+
+    registry.domains[domain] = ScoreValue(score)
+    registry.persist_to_run(run_dir)
+    typer.echo(
+        f"Trust score for '{domain}' set to {score} in {registry.persist_to_run(run_dir)}"
+    )
+
+
+# -- helpers ------------------------------------------------------------------
+
+
+def _print_registry(registry: SourceRegistry) -> None:
+    """Print a human-readable summary of *registry*."""
+
+    typer.echo("Source Trust Registry")
+    typer.echo("=" * 40)
+    typer.echo()
+    typer.echo(
+        f"Default unknown-domain score: {registry.default_unknown_domain_score}"
+    )
+    typer.echo()
+
+    typer.echo("Source-type baseline scores")
+    typer.echo("-" * 30)
+    for stype in sorted(registry.source_type_defaults, key=lambda t: t.value):
+        score = registry.source_type_defaults[stype]
+        typer.echo(f"  {stype.value:<24s} {score:3.0f}")
+    typer.echo()
+
+    if registry.domains:
+        typer.echo("Per-domain overrides")
+        typer.echo("-" * 30)
+        for domain in sorted(registry.domains):
+            score = registry.domains[domain]
+            typer.echo(f"  {domain:<32s} {score:3.0f}")
+        typer.echo()
+    else:
+        typer.echo("Per-domain overrides: (none)")
+        typer.echo()
+
+
+def _resolve_registry(run_path: str | None) -> SourceRegistry:
+    """Load the registry from *run_path* or the packaged default."""
+    if run_path:
+        registry_file = Path(run_path) / RUN_REGISTRY_RELATIVE_PATH
+        if registry_file.is_file():
+            return load_registry(registry_file)
+        typer.echo(
+            f"Warning: no registry found at {registry_file}; "
+            "using packaged default.",
+            err=True,
+        )
+    return load_registry()
 
 
 if __name__ == "__main__":
