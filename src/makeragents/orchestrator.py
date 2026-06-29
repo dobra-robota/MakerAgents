@@ -85,34 +85,39 @@ class PipelineRunner:
         evidence = EvidenceAgent(llm_client=self._llm)
         evidence_items = evidence.process(
             all_search_results,
+            run_id=metadata.run_id,
             city=city,
             community=community,
         )
         evidence.save_evidence(evidence_items, run_dir)
 
-        # 3. Opportunity
-        logger.info("Step 3/7: Opportunity — deriving candidate opportunities")
-        opportunity_agent = OpportunityAgent(
-            metadata.max_opportunities,
-            llm_client=self._llm,
-            city=city,
-            community=community,
-        )
-        opportunities = opportunity_agent.process(evidence_items, run_dir)
-
-        # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
-        max_opps = min(len(opportunities), metadata.max_opportunities)
-        selected = opportunities[:max_opps]
-
-        if selected:
-            self._process_opportunities(
-                selected, evidence_items, run_dir, city, community
+        if evidence_items:
+            # 3. Opportunity
+            logger.info("Step 3/7: Opportunity — deriving candidate opportunities")
+            opportunity_agent = OpportunityAgent(
+                metadata.max_opportunities,
+                llm_client=self._llm,
+                city=city,
+                community=community,
             )
+            opportunities = opportunity_agent.process(evidence_items, run_dir)
+
+            # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
+            max_opps = min(len(opportunities), metadata.max_opportunities)
+            selected = opportunities[:max_opps]
+
+            if selected:
+                self._process_opportunities(
+                    selected, evidence_items, run_dir, city, community
+                )
+            else:
+                logger.warning(
+                    "No opportunities derived — skipping per-opportunity steps"
+                )
         else:
             logger.warning(
-                "No opportunities derived — skipping per-opportunity steps"
+                "No evidence items produced — skipping opportunity steps"
             )
-
         # 5. Report
         logger.info("Step 7/7: Report — generating final report")
         report = ReportAgent()
