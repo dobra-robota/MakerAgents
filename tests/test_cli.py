@@ -7,6 +7,7 @@ from unittest import mock
 import yaml
 
 from makeragents.config import AppConfig
+from makeragents.search.providers import ProviderResponse, SearchResult
 from makeragents.sources.registry import (
     RUN_REGISTRY_RELATIVE_PATH,
     SourceRegistry,
@@ -23,7 +24,22 @@ def _mock_config() -> AppConfig:
     return AppConfig(deepseek_api_key="test-key")
 
 
-def test_run_command_creates_run_folder_and_invokes_pipeline(
+def _mock_search_response(query: str, *, count: int = 10) -> ProviderResponse:
+    """Return a deterministic, network-free provider response."""
+    return ProviderResponse(
+        provider="duckduckgo",
+        results=[
+            SearchResult(
+                title=f"Result for {query}",
+                url="https://example.test/result",
+                snippet=f"Snippet for {query}",
+            )
+        ],
+        raw={"query": query, "count": count, "items": [{"title": "raw"}]},
+    )
+
+
+def test_run_command_creates_run_folder_and_writes_search_results(
     tmp_path: Path,
 ) -> None:
     with (
@@ -31,14 +47,10 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
             "makeragents.cli.load_config", return_value=_mock_config()
         ) as mock_load,
         mock.patch(
-            "makeragents.cli.PipelineRunner"
-        ) as mock_runner_cls,
+            "makeragents.search.client.SearchClient.search",
+            side_effect=_mock_search_response,
+        ) as mock_search,
     ):
-        mock_runner = mock.MagicMock()
-        mock_runner.run.return_value = str(
-            tmp_path / "runs" / "fake" / "final-report.md"
-        )
-        mock_runner_cls.return_value = mock_runner
 
         result = _invoke_in(
             tmp_path,
@@ -54,11 +66,9 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
     # Verify load_config was called.
     mock_load.assert_called_once()
 
-    # Verify PipelineRunner was constructed with the config.
-    mock_runner_cls.assert_called_once_with(config=mock_load.return_value)
-
-    # Verify runner.run was called.
-    mock_runner.run.assert_called_once()
+    # Verify ResearchAgent.search used the configured search client without
+    # touching the network.
+    assert mock_search.called
 
     # Verify run folder was created.
     runs_root = tmp_path / "runs"
@@ -71,7 +81,31 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
     assert load_registry(registry_path).model_dump() == load_registry().model_dump()
 
 
-    assert (run_dir / "final-report.md").is_file()
+    report_text = (run_dir / "final-report.md").read_text(encoding="utf-8")
+    assert "No research has been performed yet" in report_text
+    assert not (run_dir / "evidence").exists()
+    assert not (run_dir / "opportunities").exists()
+
+    search_payload = json.loads(
+        (run_dir / "sources" / "search-results.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first_result = search_payload["query_results"][0]
+    assert first_result["query"] == "senior citizens problems in Łodz"
+    assert first_result["provider"] == "duckduckgo"
+    assert first_result["results"] == [
+        {
+            "title": "Result for senior citizens problems in Łodz",
+            "url": "https://example.test/result",
+            "snippet": "Snippet for senior citizens problems in Łodz",
+        }
+    ]
+    assert first_result["raw"] == {
+        "query": "senior citizens problems in Łodz",
+        "count": 5,
+        "items": [{"title": "raw"}],
+    }
     parsed = yaml.safe_load((run_dir / "run.yaml").read_text(encoding="utf-8"))
     assert parsed["city"] == "Łodz"
     assert parsed["community"] == "senior citizens"
@@ -92,14 +126,10 @@ def test_run_command_honors_max_opportunities(tmp_path: Path) -> None:
             "makeragents.cli.load_config", return_value=_mock_config()
         ),
         mock.patch(
-            "makeragents.cli.PipelineRunner"
-        ) as mock_runner_cls,
+            "makeragents.search.client.SearchClient.search",
+            side_effect=_mock_search_response,
+        ),
     ):
-        mock_runner = mock.MagicMock()
-        mock_runner.run.return_value = str(
-            tmp_path / "runs" / "fake" / "final-report.md"
-        )
-        mock_runner_cls.return_value = mock_runner
 
         result = _invoke_in(
             tmp_path,

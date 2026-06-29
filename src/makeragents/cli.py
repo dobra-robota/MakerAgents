@@ -7,8 +7,8 @@ from pathlib import Path
 import typer
 
 from makeragents.agents.report import ReportAgent
+from makeragents.agents.research import ResearchAgent
 from makeragents.config import load_config
-from makeragents.orchestrator import PipelineRunner
 from makeragents.retry import (
     PIPELINE_STEPS,
     _RETRYABLE_STEPS,
@@ -54,7 +54,7 @@ def run(
         5, min=1, help="Maximum number of opportunities to surface."
     ),
 ) -> None:
-    """Research a city + community and produce a ranked opportunity report."""
+    """Research a city + community and collect source results."""
 
     # 1. Load config and validate required API keys.
     config = load_config()
@@ -75,10 +75,12 @@ def run(
     run_dir = create_run_folder(metadata)
     load_registry().persist_to_run(run_dir)
 
-    # 3. Run the full pipeline.
-    runner = PipelineRunner(config=config)
-    final_report = runner.run(run_dir, metadata)
-
+    # 3. Run the research search pass. Later stages are intentionally not
+    # invoked here yet; ``create_run_folder`` has already written the current
+    # walking-skeleton final-report stub.
+    research = ResearchAgent(config=config)
+    research.search(run_dir, city, community)
+    final_report = str(run_dir / "final-report.md")
     # 4. Echo a short summary.
     typer.echo(f"Run directory: {run_dir}")
     typer.echo(f"Final report:  {final_report}")
