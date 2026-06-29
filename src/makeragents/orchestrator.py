@@ -29,7 +29,8 @@ from makeragents.agents.taker import TakerAgent, TakerOutput
 from makeragents.config import AppConfig, load_config
 from makeragents.llm.client import LLMClient
 from makeragents.retry import PIPELINE_STEPS, write_status
-from makeragents.schemas import EvidenceItem, Opportunity, RunMetadata
+from makeragents.run import opportunity_artifact_slug
+from makeragents.schemas import EvidenceItem, Opportunity, RunMetadata, ScoreSet
 from makeragents.search.providers import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class PipelineRunner:
         run_dir: Path,
         metadata: RunMetadata,
     ) -> str:
-        """Execute the full pipeline and return the final report path.
+        """Execute Research → Evidence → Opportunity → Maker.
 
         Args:
             run_dir: Path to the run folder created by
@@ -65,7 +66,8 @@ class PipelineRunner:
             metadata: The run metadata (city, community, max_opportunities).
 
         Returns:
-            The path to ``final-report.md`` as a string.
+            The existing ``final-report.md`` stub path as a string. Report
+            generation belongs to a later pipeline stage.
         """
         city = metadata.city
         community = metadata.community
@@ -100,12 +102,12 @@ class PipelineRunner:
         )
         opportunities = opportunity_agent.process(evidence_items, run_dir)
 
-        # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
+        # 4. Per-opportunity: Maker only.
         max_opps = min(len(opportunities), metadata.max_opportunities)
         selected = opportunities[:max_opps]
 
         if selected:
-            self._process_opportunities(
+            self._process_maker_opportunities(
                 selected, evidence_items, run_dir, city, community
             )
         else:
@@ -113,16 +115,89 @@ class PipelineRunner:
                 "No opportunities derived — skipping per-opportunity steps"
             )
 
-        # 5. Report
-        logger.info("Step 7/7: Report — generating final report")
-        report = ReportAgent()
-        report_path = report.generate(run_dir)
+        # Report generation is intentionally left to a later pipeline stage.
+        return str(run_dir / "final-report.md")
 
-        return report_path
 
     # ------------------------------------------------------------------
     # Per-opportunity processing
     # ------------------------------------------------------------------
+
+    def _process_maker_opportunities(
+        self,
+        opportunities: list[Opportunity],
+        evidence_items: list[EvidenceItem],
+        run_dir: Path,
+        city: str,
+        community: str,
+    ) -> None:
+        """Run Maker for each opportunity and persist maker artifacts."""
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._process_maker_opportunity,
+                    opp,
+                    evidence_items,
+                    run_dir,
+                    city,
+                    community,
+                ): opp
+                for opp in opportunities
+            }
+            for future in concurrent.futures.as_completed(futures):
+                opp = futures[future]
+                try:
+                    future.result()
+                except Exception:
+                    logger.exception(
+                        "Maker stage for opportunity %s failed — "
+                        "continuing with others",
+                        opp.id,
+                    )
+
+    def _process_maker_opportunity(
+        self,
+        opp: Opportunity,
+        evidence_items: list[EvidenceItem],
+        run_dir: Path,
+        city: str,
+        community: str,
+    ) -> MakerResult:
+        """Run Maker for one opportunity using only its cited evidence."""
+        slug = opportunity_artifact_slug(opp)
+        opp_dir = run_dir / "opportunities" / slug
+        opp_dir.mkdir(parents=True, exist_ok=True)
+
+        supporting_evidence = self._select_supporting_evidence(opp, evidence_items)
+        maker_agent = MakerAgent(llm_client=self._llm)
+        maker_result = maker_agent.run_with_llm(
+            opp,
+            supporting_evidence,
+            city=city,
+            community=community,
+        )
+        maker_agent.save_output(maker_result, opp_dir)
+        self._write_maker_scores(opp, opp_dir, maker_result)
+
+        status = {
+            "opportunity_id": opp.id,
+            "slug": slug,
+            "steps": {step: "incomplete" for step in PIPELINE_STEPS},
+        }
+        for step in ("research", "evidence", "opportunity", "maker"):
+            status["steps"][step] = "complete"
+        write_status(opp_dir, status)
+
+        return maker_result
+
+    @staticmethod
+    def _select_supporting_evidence(
+        opp: Opportunity,
+        evidence_items: list[EvidenceItem],
+    ) -> list[EvidenceItem]:
+        """Return evidence items cited by ``opp.evidence_ids``, preserving order."""
+        by_id = {item.id: item for item in evidence_items}
+        return [by_id[eid] for eid in opp.evidence_ids if eid in by_id]
 
     def _process_opportunities(
         self,
@@ -164,9 +239,7 @@ class PipelineRunner:
         community: str,
     ) -> None:
         """Run Maker/Taker → Mediator → Cost for a single opportunity."""
-        from makeragents.run import slugify
-
-        slug = slugify(opp.title) or opp.id
+        slug = opportunity_artifact_slug(opp)
         opp_dir = run_dir / "opportunities" / slug
         opp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -296,5 +369,43 @@ class PipelineRunner:
         opp_yaml = opp.model_dump(mode="json")
         (opp_dir / "opportunity.yaml").write_text(
             yaml.safe_dump(opp_yaml, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _scores_from_maker_result(result: MakerResult) -> ScoreSet:
+        """Build a score set from Maker output with downstream scores unset."""
+        return ScoreSet(
+            validity_score=result.validity_score,
+            maker_score=result.maker_score,
+            maker_confidence=result.maker_confidence,
+            taker_score=0.0,
+            taker_confidence="low",
+            people_helped_score=result.people_helped_score,
+            severity_score=result.severity_score,
+            impact_score=result.impact_score,
+            intervention_ease_score=result.intervention_ease_score,
+            harm_risk_score=result.harm_risk_score,
+            ability_to_act_score=result.ability_to_act_score,
+            rank_score=result.rank_score,
+        )
+
+    @staticmethod
+    def _write_maker_scores(
+        opp: Opportunity,
+        opp_dir: Path,
+        result: MakerResult,
+    ) -> None:
+        """Persist Maker scores back into ``opportunity.yaml``."""
+        scores = PipelineRunner._scores_from_maker_result(result)
+        payload = opp.model_copy(update={"scores": scores}).model_dump(mode="json")
+        dest = opp_dir / "opportunity.yaml"
+        if dest.is_file():
+            existing = yaml.safe_load(dest.read_text(encoding="utf-8")) or {}
+            if isinstance(existing, dict):
+                existing["scores"] = payload["scores"]
+                payload = existing
+        dest.write_text(
+            yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
         )

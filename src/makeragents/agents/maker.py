@@ -273,10 +273,10 @@ class MakerAgent:
     def save_output(
         self,
         result: MakerResult,
-        run_dir: Path | str,
+        opportunity_dir: Path | str,
     ) -> tuple[Path, Path]:
-        """Write maker.json and maker.md to the opportunity folder."""
-        opp_dir = Path(run_dir) / "opportunities" / result.opportunity_id
+        """Write maker.json and maker.md into an opportunity folder."""
+        opp_dir = Path(opportunity_dir)
         opp_dir.mkdir(parents=True, exist_ok=True)
 
         json_path = opp_dir / "maker.json"

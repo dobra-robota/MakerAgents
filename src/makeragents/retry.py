@@ -15,6 +15,7 @@ from makeragents.agents.maker import MakerAgent
 from makeragents.agents.mediator import MediatorAgent
 from makeragents.agents.taker import TakerAgent
 from makeragents.schemas import Confidence, EvidenceItem, Opportunity, ScoreSet
+from makeragents.run import opportunity_artifact_slug
 
 STATUS_YAML_FILENAME = "status.yaml"
 
@@ -243,7 +244,9 @@ def _run_maker_step(
     """Run the Maker Agent and return the opportunity with updated scores."""
     agent = MakerAgent()
     result = agent.run(opportunity, evidence_items)
-    agent.save_output(result, run_dir)
+    agent.save_output(
+        result, run_dir / "opportunities" / opportunity_artifact_slug(opportunity)
+    )
 
     scores = ScoreSet(
         validity_score=result.validity_score,
