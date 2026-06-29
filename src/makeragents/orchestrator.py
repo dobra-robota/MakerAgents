@@ -164,9 +164,9 @@ class PipelineRunner:
         community: str,
     ) -> None:
         """Run Maker/Taker → Mediator → Cost for a single opportunity."""
-        from makeragents.run import slugify
+        from makeragents.run import opportunity_artifact_slug
 
-        slug = slugify(opp.title) or opp.id
+        slug = opportunity_artifact_slug(opp)
         opp_dir = run_dir / "opportunities" / slug
         opp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -207,8 +207,8 @@ class PipelineRunner:
             maker_result: MakerResult = maker_future.result()
             taker_output: TakerOutput = taker_future.result()
 
-        maker_agent.save_output(maker_result, opp_dir)
-        taker_agent.save_output(taker_output, opp_dir)
+        maker_agent.save_output(maker_result, run_dir)
+        taker_agent.save_output(taker_output, run_dir)
 
         status["steps"]["maker"] = "complete"
         status["steps"]["taker"] = "complete"
@@ -235,7 +235,7 @@ class PipelineRunner:
                 "Mediator LLM call failed — falling back to heuristic"
             )
             mediation = mediator.run(opp)
-        mediator.save_output(mediation, opp_dir)
+        mediator.save_output(mediation, run_dir)
         status["steps"]["mediator"] = "complete"
         write_status(opp_dir, status)
 
@@ -261,7 +261,7 @@ class PipelineRunner:
                 "Cost Checker LLM call failed — falling back to heuristic"
             )
             estimate = cost.estimate(opp)
-        cost.save_output(estimate, opp_dir)
+        cost.write_artifacts(estimate, run_dir)
         status["steps"]["cost_checker"] = "complete"
         write_status(opp_dir, status)
 

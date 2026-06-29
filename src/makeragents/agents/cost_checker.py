@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from makeragents.run import opportunity_artifact_slug
 from makeragents.schemas import Opportunity, OpportunityType, POCType, Verdict
 
 if TYPE_CHECKING:
@@ -337,7 +338,11 @@ class CostCheckerAgent:
         run_dir: Path | str,
     ) -> tuple[Path, Path]:
         """Write cost.json and cost.md to the opportunity folder."""
-        opp_dir = Path(run_dir) / "opportunities" / estimate.opportunity_id
+        opp_dir = (
+            Path(run_dir)
+            / "opportunities"
+            / opportunity_artifact_slug(estimate.opportunity_id)
+        )
         opp_dir.mkdir(parents=True, exist_ok=True)
 
         cost_json = opp_dir / "cost.json"

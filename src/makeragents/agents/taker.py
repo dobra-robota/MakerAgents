@@ -13,7 +13,7 @@ Usage
 -----
     taker = TakerAgent()
     result = taker.analyze(opportunity, evidence_items)
-    taker.save_output(opportunity_slug, run_dir)
+    taker.save_output(result, run_dir)
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from makeragents.run import opportunity_artifact_slug
 
 from makeragents.schemas import (
     ClaimClassification,
@@ -677,8 +679,7 @@ class TakerAgent:
     @staticmethod
     def save_output(
         output: TakerOutput,
-        opportunity_slug: str,
-        run_dir: Path,
+        run_dir: Path | str,
     ) -> tuple[Path, Path]:
         """Write ``taker.json`` and ``taker.md`` to the opportunity folder.
 
@@ -686,9 +687,7 @@ class TakerAgent:
         ----------
         output : TakerOutput
             The analysis result to persist.
-        opportunity_slug : str
-            Slug identifying the opportunity within the run.
-        run_dir : Path
+        run_dir : Path | str
             Path to the run directory (``runs/<run-id>/``).
 
         Returns
@@ -696,7 +695,11 @@ class TakerAgent:
         tuple[Path, Path]
             ``(json_path, md_path)`` of the written files.
         """
-        opportunity_dir = run_dir / "opportunities" / opportunity_slug
+        opportunity_dir = (
+            Path(run_dir)
+            / "opportunities"
+            / opportunity_artifact_slug(output.opportunity_id)
+        )
         opportunity_dir.mkdir(parents=True, exist_ok=True)
 
         json_path = opportunity_dir / "taker.json"

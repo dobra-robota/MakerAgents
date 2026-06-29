@@ -14,7 +14,7 @@ from pydantic import Field
 
 from makeragents.llm import ChatMessage
 from makeragents.prompts import load_prompt
-from makeragents.run import slugify
+from makeragents.run import opportunity_artifact_slug
 from makeragents.schemas import (
     MakerAgentsModel,
     NonEmptyString,
@@ -323,7 +323,11 @@ class MediatorAgent:
         run_dir: Path | str,
     ) -> tuple[Path, Path]:
         """Write mediator.json and mediator.md to the opportunity folder."""
-        opp_dir = Path(run_dir) / "opportunities" / slugify(result.opportunity_id)
+        opp_dir = (
+            Path(run_dir)
+            / "opportunities"
+            / opportunity_artifact_slug(result.opportunity_id)
+        )
         opp_dir.mkdir(parents=True, exist_ok=True)
 
         json_path = opp_dir / "mediator.json"

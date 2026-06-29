@@ -273,7 +273,7 @@ def _run_taker_step(
     output, updated_opportunity = agent.analyze_and_update(
         opportunity, evidence_items
     )
-    TakerAgent.save_output(output, slug, run_dir)
+    TakerAgent.save_output(output, run_dir)
     return updated_opportunity
 
 

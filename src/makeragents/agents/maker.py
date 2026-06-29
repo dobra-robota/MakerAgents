@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from makeragents.run import opportunity_artifact_slug
 from makeragents.schemas import (
     ClaimClassification,
     Confidence,
@@ -276,7 +277,11 @@ class MakerAgent:
         run_dir: Path | str,
     ) -> tuple[Path, Path]:
         """Write maker.json and maker.md to the opportunity folder."""
-        opp_dir = Path(run_dir) / "opportunities" / result.opportunity_id
+        opp_dir = (
+            Path(run_dir)
+            / "opportunities"
+            / opportunity_artifact_slug(result.opportunity_id)
+        )
         opp_dir.mkdir(parents=True, exist_ok=True)
 
         json_path = opp_dir / "maker.json"

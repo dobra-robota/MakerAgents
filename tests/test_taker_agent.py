@@ -576,9 +576,7 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        json_path, md_path = taker_agent.save_output(
-            output, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
+        json_path, md_path = taker_agent.save_output(output, tmp_path)
 
         # Check JSON file.
         assert json_path.exists()
@@ -615,9 +613,7 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        taker_agent.save_output(
-            output, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
+        taker_agent.save_output(output, tmp_path)
         assert (tmp_path / "opportunities" / "senior-services-guide" / "taker.json").exists()
         assert (tmp_path / "opportunities" / "senior-services-guide" / "taker.md").exists()
 
@@ -629,11 +625,10 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        json_path, md_path = taker_agent.save_output(
-            output, opportunity_slug="slug", run_dir=tmp_path
-        )
-        assert json_path == tmp_path / "opportunities" / "slug" / "taker.json"
-        assert md_path == tmp_path / "opportunities" / "slug" / "taker.md"
+        json_path, md_path = taker_agent.save_output(output, tmp_path)
+        expected_dir = tmp_path / "opportunities" / "senior-services-guide"
+        assert json_path == expected_dir / "taker.json"
+        assert md_path == expected_dir / "taker.md"
 
 
 # ------------------------------------------------------------------
@@ -1194,9 +1189,7 @@ class TestTakerAgentRunWithLLM:
         result = agent.run_with_llm(
             vulnerable_opportunity, strong_evidence_items
         )
-        json_path, md_path = agent.save_output(
-            result, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
+        json_path, md_path = agent.save_output(result, tmp_path)
         data = _json.loads(json_path.read_text(encoding="utf-8"))
         assert "claims" in data
         assert isinstance(data["claims"], list)

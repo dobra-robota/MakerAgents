@@ -146,7 +146,7 @@ class TestOrchestratorConcurrency:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
+            opp_dir = run_dir / "opportunities" / "opp-000"
             opp_dir.mkdir(parents=True)
 
             call_order = []
@@ -207,7 +207,7 @@ class TestOrchestratorConcurrency:
 
             cost = mock.MagicMock()
             cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
+            cost.write_artifacts.return_value = None
 
             with (
                 mock.patch(
@@ -249,7 +249,7 @@ class TestOrchestratorStatusTracking:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
+            opp_dir = run_dir / "opportunities" / "opp-000"
             opp_dir.mkdir(parents=True)
 
             maker_agent = mock.MagicMock()
@@ -300,7 +300,7 @@ class TestOrchestratorStatusTracking:
 
             cost = mock.MagicMock()
             cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
+            cost.write_artifacts.return_value = None
 
             with (
                 mock.patch(
