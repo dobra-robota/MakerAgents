@@ -53,6 +53,12 @@ def run(
     max_opportunities: int = typer.Option(
         5, min=1, help="Maximum number of opportunities to surface."
     ),
+    queries_per_run: int = typer.Option(
+        10, min=1, help="Number of search queries to run."
+    ),
+    results_per_query: int = typer.Option(
+        5, min=1, help="Number of search results to request per query."
+    ),
 ) -> None:
     """Research a city + community and produce a ranked opportunity report."""
 
@@ -71,6 +77,8 @@ def run(
         city=city,
         community=community,
         max_opportunities=max_opportunities,
+        queries_per_run=queries_per_run,
+        results_per_query=results_per_query,
     )
     run_dir = create_run_folder(metadata)
 

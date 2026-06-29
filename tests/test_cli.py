@@ -17,6 +17,17 @@ from tests.conftest import _invoke_in, app, runner
 
 # -- run ----------------------------------------------------------------------
 
+def test_run_help_shows_search_volume_options() -> None:
+    result = runner.invoke(app, ["run", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--queries-per-run" in result.output
+    assert "Number of search queries" in result.output
+    assert "[default: 10]" in result.output
+    assert "--results-per-query" in result.output
+    assert "Number of search results" in result.output
+    assert "[default: 5]" in result.output
+
 
 def _mock_config() -> AppConfig:
     """Return a config with a fake API key for testing."""
@@ -72,6 +83,8 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
     assert parsed["city"] == "Łodz"
     assert parsed["community"] == "senior citizens"
     assert parsed["max_opportunities"] == 5
+    assert parsed["queries_per_run"] == 10
+    assert parsed["results_per_query"] == 5
     assert "timestamp" in parsed
     assert parsed["run_id"] == run_dir.name
 
@@ -80,6 +93,45 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
     assert "Run directory:" in output
     assert "Final report:" in output
     assert "Completed run for 'Łodz / senior citizens'" in output
+
+
+def test_run_command_honors_search_volume_options(tmp_path: Path) -> None:
+    with (
+        mock.patch(
+            "makeragents.cli.load_config", return_value=_mock_config()
+        ),
+        mock.patch(
+            "makeragents.cli.PipelineRunner"
+        ) as mock_runner_cls,
+    ):
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = str(
+            tmp_path / "runs" / "fake" / "final-report.md"
+        )
+        mock_runner_cls.return_value = mock_runner
+
+        result = _invoke_in(
+            tmp_path,
+            "run",
+            "--city",
+            "Berlin",
+            "--community",
+            "cyclists",
+            "--queries-per-run",
+            "12",
+            "--results-per-query",
+            "7",
+        )
+
+    assert result.exit_code == 0, result.output
+    run_dir = next((tmp_path / "runs").iterdir())
+    parsed = yaml.safe_load((run_dir / "run.yaml").read_text(encoding="utf-8"))
+    assert parsed["queries_per_run"] == 12
+    assert parsed["results_per_query"] == 7
+
+    metadata = mock_runner.run.call_args.args[1]
+    assert metadata.queries_per_run == 12
+    assert metadata.results_per_query == 7
 
 
 def test_run_command_honors_max_opportunities(tmp_path: Path) -> None:
@@ -123,6 +175,36 @@ def test_run_command_rejects_invalid_max_opportunities(tmp_path: Path) -> None:
         "--community",
         "cyclists",
         "--max-opportunities",
+        "0",
+    )
+
+    assert result.exit_code != 0
+
+
+def test_run_command_rejects_invalid_queries_per_run(tmp_path: Path) -> None:
+    result = _invoke_in(
+        tmp_path,
+        "run",
+        "--city",
+        "Berlin",
+        "--community",
+        "cyclists",
+        "--queries-per-run",
+        "0",
+    )
+
+    assert result.exit_code != 0
+
+
+def test_run_command_rejects_invalid_results_per_query(tmp_path: Path) -> None:
+    result = _invoke_in(
+        tmp_path,
+        "run",
+        "--city",
+        "Berlin",
+        "--community",
+        "cyclists",
+        "--results-per-query",
         "0",
     )
 

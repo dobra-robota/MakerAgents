@@ -37,6 +37,8 @@ def build_run_metadata(
     city: str,
     community: str,
     max_opportunities: int = 5,
+    queries_per_run: int = 10,
+    results_per_query: int = 5,
     output_dir: str = "runs",
 ) -> RunMetadata:
     """Build a :class:`RunMetadata` with a timestamped, slugged ``run_id``."""
@@ -46,6 +48,8 @@ def build_run_metadata(
         city=city,
         community=community,
         max_opportunities=max_opportunities,
+        queries_per_run=queries_per_run,
+        results_per_query=results_per_query,
         output_dir=output_dir,
     )
     timestamp = metadata.created_at.strftime(_TIMESTAMP_FORMAT)
@@ -100,6 +104,8 @@ def _write_run_yaml(run_dir: Path, metadata: RunMetadata) -> None:
         "community": metadata.community,
         "timestamp": metadata.created_at.isoformat(),
         "max_opportunities": metadata.max_opportunities,
+        "queries_per_run": metadata.queries_per_run,
+        "results_per_query": metadata.results_per_query,
     }
     (run_dir / RUN_YAML_FILENAME).write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),

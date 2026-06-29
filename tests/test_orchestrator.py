@@ -74,7 +74,12 @@ class TestOrchestratorTopology:
         runner = PipelineRunner(
             config=AppConfig(deepseek_api_key="test-key"),
         )
-        metadata = build_run_metadata(city="Lodz", community="senior")
+        metadata = build_run_metadata(
+            city="Lodz",
+            community="senior",
+            queries_per_run=11,
+            results_per_query=6,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
 
@@ -102,6 +107,13 @@ class TestOrchestratorTopology:
                 mock_opp.return_value.process.return_value = []
 
                 result = runner.run(run_dir, metadata)
+                mock_research.return_value.search.assert_called_once_with(
+                    run_dir,
+                    "Lodz",
+                    "senior",
+                    queries_per_run=11,
+                    results_per_query=6,
+                )
 
             # Should still run and return a report path
             assert "final-report.md" in result

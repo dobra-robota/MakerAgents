@@ -112,6 +112,8 @@ class RunMetadata(MakerAgentsModel):
     community: NonEmptyString
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     max_opportunities: int = Field(default=5, ge=1)
+    queries_per_run: int = Field(default=10, ge=1)
+    results_per_query: int = Field(default=5, ge=1)
     output_dir: NonEmptyString = "runs"
 
 

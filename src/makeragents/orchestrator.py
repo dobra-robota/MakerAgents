@@ -73,7 +73,13 @@ class PipelineRunner:
         # 1. Research
         logger.info("Step 1/7: Research — generating and executing queries")
         research = ResearchAgent(llm_client=self._llm, config=self._config)
-        search_output = research.search(run_dir, city, community)
+        search_output = research.search(
+            run_dir,
+            city,
+            community,
+            queries_per_run=metadata.queries_per_run,
+            results_per_query=metadata.results_per_query,
+        )
 
         # Flatten search results for evidence agent
         all_search_results: list[SearchResult] = []
