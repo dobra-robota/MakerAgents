@@ -22,7 +22,7 @@ from makeragents.agents.cost_checker import CostCheckerAgent
 from makeragents.agents.evidence import EvidenceAgent
 from makeragents.agents.maker import MakerAgent, MakerResult
 from makeragents.agents.mediator import MediatorAgent
-from makeragents.agents.opportunity import OpportunityAgent
+from makeragents.agents.opportunity import OpportunityAgent, build_opportunity_readme
 from makeragents.agents.report import ReportAgent
 from makeragents.agents.research import ResearchAgent
 from makeragents.agents.taker import TakerAgent, TakerOutput
@@ -166,11 +166,10 @@ class PipelineRunner:
         """Run Maker/Taker → Mediator → Cost for a single opportunity."""
         from makeragents.run import slugify
 
-        slug = slugify(opp.title) or opp.id
+        slug = slugify(opp.id)
         opp_dir = run_dir / "opportunities" / slug
         opp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write README.md and opportunity.yaml
         self._write_opportunity_artifacts(opp, opp_dir)
 
         # Status tracking
@@ -272,25 +271,7 @@ class PipelineRunner:
     @staticmethod
     def _write_opportunity_artifacts(opp: Opportunity, opp_dir: Path) -> None:
         """Write README.md and opportunity.yaml for an opportunity."""
-        readme = (
-            f"# {opp.title}\n\n"
-            f"- **ID**: `{opp.id}`\n"
-            f"- **Type**: `{opp.type.value}`\n"
-            f"- **Speculative**: {opp.speculative}\n\n"
-            f"## Pain Summary\n\n{opp.pain_summary}\n\n"
-        )
-        if opp.who_benefits:
-            readme += "## Who Benefits\n\n" + "\n".join(
-                f"- {g}" for g in opp.who_benefits
-            ) + "\n\n"
-        if opp.vulnerable_groups:
-            readme += "## Vulnerable Groups\n\n" + "\n".join(
-                f"- {g}" for g in opp.vulnerable_groups
-            ) + "\n\n"
-        if opp.evidence_ids:
-            readme += "## Evidence\n\n" + "\n".join(
-                f"- `{eid}`" for eid in opp.evidence_ids
-            ) + "\n\n"
+        readme = build_opportunity_readme(opp)
         (opp_dir / "README.md").write_text(readme, encoding="utf-8")
 
         opp_yaml = opp.model_dump(mode="json")
