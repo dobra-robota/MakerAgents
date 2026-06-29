@@ -1,6 +1,7 @@
 """CLI integration tests (no API calls)."""
 
 import json
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +14,7 @@ from makeragents.sources.registry import (
     SourceRegistry,
     load_registry,
 )
+from makeragents.search.providers import ProviderResponse, SearchResult
 from tests.conftest import _invoke_in, app, runner
 
 
@@ -263,6 +265,301 @@ def test_run_command_rejects_missing_api_key(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Error:" in result.output
     assert "DEEPSEEK_API_KEY" in result.output
+
+
+def test_run_command_writes_full_artifact_tree_with_mocked_search(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """``maker run`` writes the expected local artifact tree without network."""
+
+    class FakeSearchClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def search(self, query: str, *, count: int = 10) -> ProviderResponse:
+            results = [
+                SearchResult(
+                    title="Łodz senior transport support audit",
+                    url="https://lodz.example.gov/senior-transport",
+                    snippet=(
+                        "2026 city audit: senior citizens in Łodz report "
+                        "long waits and inaccessible transport to appointments."
+                    ),
+                ),
+                SearchResult(
+                    title="Families describe transport gaps",
+                    url="https://forum.lodz.example/senior-mobility",
+                    snippet=(
+                        "Forum complaint from families says senior citizens "
+                        "need clearer transport help and appointment guidance."
+                    ),
+                ),
+            ][:count]
+            return ProviderResponse(
+                provider="mock",
+                results=results,
+                raw={"query": query, "result_count": len(results)},
+            )
+
+    class FakeLLMClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def chat_json(self, messages, **kwargs):
+            prompt = "\n".join(message.content for message in messages)
+            evidence_ids = re.findall(r"(?:\*\*|\[)(EVID-[^\]*]+)(?:\*\*|\])", prompt)
+
+            if "Research Agent" in prompt:
+                return {
+                    "queries": [
+                        {
+                            "query": (
+                                "Łodz senior citizens accessible transport help"
+                            ),
+                            "language": "en",
+                        }
+                    ]
+                }
+
+            if "Evidence Agent" in prompt:
+                return {
+                    "items": [
+                        {
+                            "snippet_index": 0,
+                            "evidence_type": "official_statement",
+                            "language": "en",
+                            "confidence": "high",
+                            "recency": "2026",
+                            "claim_classification": "evidence_based",
+                        },
+                        {
+                            "snippet_index": 1,
+                            "evidence_type": "complaint",
+                            "language": "en",
+                            "confidence": "medium",
+                            "recency": "recent",
+                            "claim_classification": "inference",
+                        },
+                    ]
+                }
+
+            if "Opportunity Agent" in prompt:
+                return {
+                    "opportunities": [
+                        {
+                            "id": "accessible-senior-transport-guide",
+                            "title": "Accessible senior transport guide",
+                            "type": "public_guide",
+                            "pain_summary": (
+                                "Senior citizens in Łodz need clearer, "
+                                "accessible transport guidance for appointments."
+                            ),
+                            "who_benefits": [
+                                "senior citizens",
+                                "families and carers",
+                            ],
+                            "vulnerable_groups": [
+                                "mobility-limited senior citizens"
+                            ],
+                            "evidence_ids": evidence_ids,
+                            "speculative": False,
+                        }
+                    ]
+                }
+
+            if "Maker Agent" in prompt:
+                return {
+                    "value_add_summary": (
+                        "A concise guide would help senior citizens and carers "
+                        "find vetted transport options with clear constraints."
+                    ),
+                    "score": 82,
+                    "confidence": "high",
+                    "evidence_ids": evidence_ids,
+                    "claims": [
+                        {
+                            "text": "The city audit supports the access need.",
+                            "classification": "evidence_based",
+                            "evidence_id": evidence_ids[0],
+                        }
+                    ],
+                }
+
+            if "Taker Agent" in prompt:
+                return {
+                    "risk_summary": (
+                        "Main risks are stale advice and gatekeeping; keep the "
+                        "guide source-cited and human-reviewed."
+                    ),
+                    "score": 18,
+                    "confidence": "medium",
+                    "evidence_ids": evidence_ids,
+                    "claims": [
+                        {
+                            "text": "Guidance must avoid false authority.",
+                            "classification": "inference",
+                            "evidence_id": evidence_ids[0],
+                        }
+                    ],
+                }
+
+            if "Mediator Agent" in prompt:
+                return {
+                    "comparison": (
+                        "The value-add case is stronger than the bounded risks."
+                    ),
+                    "verdict": "MANUAL_POC",
+                    "do_no_harm": {
+                        "vulnerable_groups": "Mobility-limited senior citizens",
+                        "negative_side_effects": "Outdated guidance",
+                        "abuse_risks": "Low if sources stay cited",
+                        "legal_concerns": "None identified",
+                        "misinformation_risks": "Mitigate with update dates",
+                        "dependency_risks": "Keep alternatives visible",
+                        "false_authority_risks": "Label as informational",
+                        "safeguards": "Review before publication",
+                    },
+                    "safe_intervention_shape": (
+                        "Run a manual POC guide with citations and review dates."
+                    ),
+                    "evidence_too_weak": False,
+                }
+
+            if "Cost Checker Agent" in prompt:
+                return {
+                    "poc_type": "public_guide",
+                    "cost_range": "$0–$50",
+                    "time_est": "1 weekend",
+                    "risk_level": "low",
+                    "first_actions": [
+                        "Collect current transport contacts.",
+                        "Draft a cited one-page guide.",
+                        "Review with two local carers.",
+                    ],
+                }
+
+            raise AssertionError(f"Unhandled prompt:\n{prompt}")
+
+    def run_with_registry(self, run_dir: Path, metadata):
+        SourceRegistry().persist_to_run(run_dir)
+        return original_run(self, run_dir, metadata)
+
+    def save_maker(self, result, opp_dir: Path):
+        opp_dir = Path(opp_dir)
+        json_path = opp_dir / "maker.json"
+        md_path = opp_dir / "maker.md"
+        json_path.write_text(
+            json.dumps(result.to_json_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        md_path.write_text(self._to_markdown(result), encoding="utf-8")
+        return json_path, md_path
+
+    def save_taker(self, output, opp_dir: Path):
+        opp_dir = Path(opp_dir)
+        json_path = opp_dir / "taker.json"
+        md_path = opp_dir / "taker.md"
+        json_path.write_text(
+            json.dumps(output.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        md_path.write_text(output.to_markdown(), encoding="utf-8")
+        return json_path, md_path
+
+    def save_mediator(self, result, opp_dir: Path):
+        opp_dir = Path(opp_dir)
+        json_path = opp_dir / "mediator.json"
+        md_path = opp_dir / "mediator.md"
+        json_path.write_text(
+            json.dumps(result.model_dump(mode="json"), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        md_path.write_text(self._to_markdown(result), encoding="utf-8")
+        return json_path, md_path
+
+    def save_cost(self, estimate, opp_dir: Path):
+        opp_dir = Path(opp_dir)
+        json_path = opp_dir / "cost.json"
+        md_path = opp_dir / "cost.md"
+        json_path.write_text(
+            json.dumps(estimate.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        md_path.write_text(self._to_markdown(estimate), encoding="utf-8")
+        return json_path, md_path
+
+    from makeragents.agents.cost_checker import CostCheckerAgent
+    from makeragents.agents.maker import MakerAgent
+    from makeragents.agents.mediator import MediatorAgent
+    from makeragents.agents.taker import TakerAgent
+    from makeragents.orchestrator import PipelineRunner
+
+    original_run = PipelineRunner.run
+    monkeypatch.setattr("makeragents.cli.load_config", _mock_config)
+    monkeypatch.setattr("makeragents.orchestrator.LLMClient", FakeLLMClient)
+    monkeypatch.setattr("makeragents.agents.research.SearchClient", FakeSearchClient)
+    monkeypatch.setattr(PipelineRunner, "run", run_with_registry)
+    monkeypatch.setattr(MakerAgent, "save_output", save_maker)
+    monkeypatch.setattr(TakerAgent, "save_output", save_taker)
+    monkeypatch.setattr(MediatorAgent, "save_output", save_mediator)
+    monkeypatch.setattr(CostCheckerAgent, "save_output", save_cost, raising=False)
+
+    result = _invoke_in(
+        tmp_path,
+        "run",
+        "--city",
+        "Łodz",
+        "--community",
+        "senior citizens",
+        "--max-opportunities",
+        "1",
+    )
+
+    assert result.exit_code == 0, result.output
+    run_dir = next((tmp_path / "runs").iterdir())
+
+    assert (run_dir / "run.yaml").is_file()
+    assert (run_dir / "sources" / "search-results.json").is_file()
+    assert (run_dir / "sources" / "source-registry.yaml").is_file()
+    assert (run_dir / "evidence" / "evidence.json").is_file()
+    assert (run_dir / "appendix" / "rejected-opportunities.md").is_file()
+    assert (run_dir / "appendix" / "incomplete-opportunities.md").is_file()
+    assert (run_dir / "final-report.md").is_file()
+
+    opportunity_dirs = [
+        path
+        for path in (run_dir / "opportunities").iterdir()
+        if path.is_dir() and (path / "opportunity.yaml").is_file()
+    ]
+    assert opportunity_dirs
+    complete_dirs = [
+        path
+        for path in opportunity_dirs
+        if all(
+            (path / name).is_file()
+            for name in (
+                "maker.json",
+                "maker.md",
+                "taker.json",
+                "taker.md",
+                "mediator.json",
+                "mediator.md",
+                "cost.json",
+                "cost.md",
+            )
+        )
+    ]
+    assert complete_dirs
+
+    report = (run_dir / "final-report.md").read_text(encoding="utf-8")
+    assert "Łodz" in report
+    assert "senior citizens" in report
+    assert "Accessible senior transport guide" in report
+    assert "Evidence References" in report
+    assert "EVID-" in report
+    assert "POC Cost Estimate" in report
+    assert "$0–$50" in report
 
 
 # -- sources ------------------------------------------------------------------
