@@ -205,9 +205,6 @@ class TestOrchestratorConcurrency:
             mediator.run_with_llm.return_value = mediator_result
             mediator.save_output.return_value = None
 
-            cost = mock.MagicMock()
-            cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
 
             with (
                 mock.patch(
@@ -221,10 +218,6 @@ class TestOrchestratorConcurrency:
                 mock.patch(
                     "makeragents.orchestrator.MediatorAgent",
                     return_value=mediator,
-                ),
-                mock.patch(
-                    "makeragents.orchestrator.CostCheckerAgent",
-                    return_value=cost,
                 ),
             ):
                 runner._process_one_opportunity(
@@ -298,9 +291,6 @@ class TestOrchestratorStatusTracking:
             mediator.run_with_llm.return_value = mediator_result
             mediator.save_output.return_value = None
 
-            cost = mock.MagicMock()
-            cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
 
             with (
                 mock.patch(
@@ -314,10 +304,6 @@ class TestOrchestratorStatusTracking:
                 mock.patch(
                     "makeragents.orchestrator.MediatorAgent",
                     return_value=mediator,
-                ),
-                mock.patch(
-                    "makeragents.orchestrator.CostCheckerAgent",
-                    return_value=cost,
                 ),
             ):
                 runner._process_one_opportunity(
@@ -333,6 +319,106 @@ class TestOrchestratorStatusTracking:
             assert status["opportunity_id"] == opp.id
             for step in [
                 "research", "evidence", "opportunity",
-                "maker", "taker", "mediator", "cost_checker",
+                "maker", "taker", "mediator",
             ]:
                 assert status["steps"][step] == "complete", f"{step} not complete"
+
+
+class TestOrchestratorMediatorArtifacts:
+    """Verify mediator.json and mediator.md are written correctly."""
+
+    def test_mediator_artifacts_written(self) -> None:
+        """Mediator writes mediator.json with verdict and Do No Harm section."""
+        opp = _make_opportunity(0)
+        evidence = [_make_evidence_item(0)]
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+        )
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
+            opp_dir.mkdir(parents=True)
+
+            maker_agent = mock.MagicMock()
+            maker_agent.run_with_llm.return_value = MakerResult(
+                opportunity_id=opp.id,
+                maker_score=75.0,
+                maker_confidence=Confidence.MEDIUM,
+                people_helped_score=70.0,
+                severity_score=60.0,
+                impact_score=65.0,
+                validity_score=80.0,
+                intervention_ease_score=50.0,
+                harm_risk_score=20.0,
+                ability_to_act_score=55.0,
+                rank_score=0.0,
+            )
+            maker_agent.save_output.return_value = None
+
+            taker_agent = mock.MagicMock()
+            taker_agent.run_with_llm.return_value = TakerOutput(
+                opportunity_id=opp.id,
+                taker_score=30.0,
+                taker_confidence="medium",
+                risk_breakdown={
+                    "extraction_risk": 20.0,
+                    "gatekeeping_risk": 20.0,
+                    "false_authority_risk": 20.0,
+                    "dependency_risk": 20.0,
+                    "harm_risk": 20.0,
+                },
+                evidence_ids=[],
+                summary="Risk",
+            )
+            taker_agent.save_output.return_value = None
+
+            mediator = mock.MagicMock()
+            mediation = MediatorResult(
+                opportunity_id=opp.id,
+                verdict=Verdict.MANUAL_POC,
+                maker_score=75.0,
+                taker_score=30.0,
+                balance_summary="Maker outweighs Taker",
+                do_no_harm={
+                    "vulnerable_groups_affected": ["seniors"],
+                    "safeguards_required_before_poc": "Validate with community.",
+                },
+                recommended_intervention_shape="Test manually",
+                evidence_ids=["ev-000"],
+                summary="Proceed with manual POC",
+            )
+            mediator.run_with_llm.return_value = mediation
+            mediator.save_output.return_value = None
+
+            with (
+                mock.patch(
+                    "makeragents.orchestrator.MakerAgent",
+                    return_value=maker_agent,
+                ),
+                mock.patch(
+                    "makeragents.orchestrator.TakerAgent",
+                    return_value=taker_agent,
+                ),
+                mock.patch(
+                    "makeragents.orchestrator.MediatorAgent",
+                    return_value=mediator,
+                ),
+            ):
+                runner._process_one_opportunity(
+                    opp, evidence, run_dir, "Lodz", "senior"
+                )
+
+            # mediator.json exists and has verdict + Do No Harm
+            mediator_json = opp_dir / "mediator.json"
+            assert mediator_json.exists()
+            data = json.loads(mediator_json.read_text())
+            assert data["verdict"] == "manual_poc"
+            assert "do_no_harm" in data
+            assert "vulnerable_groups_affected" in data["do_no_harm"]
+
+            # mediator.md exists
+            mediator_md = opp_dir / "mediator.md"
+            assert mediator_md.exists()
+            content = mediator_md.read_text()
+            assert "MANUAL_POC" in content or "manual_poc" in content.lower()

@@ -1,11 +1,8 @@
-"""Pipeline orchestrator: wires agents end-to-end via the PRD §6 topology.
+"""Pipeline orchestrator for issue #73: Research → Evidence → Opportunity
+  → Maker / Taker (parallel, per opportunity) → Mediator.
 
-Research → Evidence → Opportunity
-  → Maker / Taker (parallel, per opportunity)
-    → Mediator → Cost Checker → Report
-
-Writes the complete PRD §15 folder layout for a run, including per-opportunity
-artifacts and ``status.yaml`` for resumability.
+This PR scopes the pipeline through the Mediator stage only.
+Cost Checker and Report Agent are excluded per PRD build-order scope.
 """
 
 from __future__ import annotations
@@ -18,12 +15,10 @@ from typing import Any
 
 import yaml
 
-from makeragents.agents.cost_checker import CostCheckerAgent
 from makeragents.agents.evidence import EvidenceAgent
 from makeragents.agents.maker import MakerAgent, MakerResult
 from makeragents.agents.mediator import MediatorAgent
 from makeragents.agents.opportunity import OpportunityAgent
-from makeragents.agents.report import ReportAgent
 from makeragents.agents.research import ResearchAgent
 from makeragents.agents.taker import TakerAgent, TakerOutput
 from makeragents.config import AppConfig, load_config
@@ -57,15 +52,10 @@ class PipelineRunner:
         run_dir: Path,
         metadata: RunMetadata,
     ) -> str:
-        """Execute the full pipeline and return the final report path.
+        """Execute pipeline through Mediator stage for each opportunity.
 
-        Args:
-            run_dir: Path to the run folder created by
-                :func:`~makeragents.run.create_run_folder`.
-            metadata: The run metadata (city, community, max_opportunities).
-
-        Returns:
-            The path to ``final-report.md`` as a string.
+        Returns the path to the existing final-report.md stub.
+        Report generation belongs to a later pipeline stage.
         """
         city = metadata.city
         community = metadata.community
@@ -100,7 +90,7 @@ class PipelineRunner:
         )
         opportunities = opportunity_agent.process(evidence_items, run_dir)
 
-        # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
+        # 4. Per-opportunity: Maker + Taker → Mediator
         max_opps = min(len(opportunities), metadata.max_opportunities)
         selected = opportunities[:max_opps]
 
@@ -113,12 +103,7 @@ class PipelineRunner:
                 "No opportunities derived — skipping per-opportunity steps"
             )
 
-        # 5. Report
-        logger.info("Step 7/7: Report — generating final report")
-        report = ReportAgent()
-        report_path = report.generate(run_dir)
-
-        return report_path
+        return str(run_dir / "final-report.md")
 
     # ------------------------------------------------------------------
     # Per-opportunity processing
@@ -163,7 +148,7 @@ class PipelineRunner:
         city: str,
         community: str,
     ) -> None:
-        """Run Maker/Taker → Mediator → Cost for a single opportunity."""
+        """Run Maker/Taker → Mediator for a single opportunity."""
         from makeragents.run import slugify
 
         slug = slugify(opp.title) or opp.id
@@ -239,31 +224,6 @@ class PipelineRunner:
         status["steps"]["mediator"] = "complete"
         write_status(opp_dir, status)
 
-        # 4c. Cost Checker
-        logger.info("  Opportunity %s: Cost Checker", opp.id)
-        cost = CostCheckerAgent()
-        verdict = getattr(mediation, "verdict", None)
-        verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
-        intervention = getattr(
-            mediation, "safe_intervention_shape", ""
-        )
-        try:
-            estimate = cost.run_with_llm(
-                self._llm,
-                opp,
-                city=city,
-                community=community,
-                verdict=verdict_str,
-                intervention_shape=intervention,
-            )
-        except Exception:
-            logger.warning(
-                "Cost Checker LLM call failed — falling back to heuristic"
-            )
-            estimate = cost.estimate(opp)
-        cost.save_output(estimate, opp_dir)
-        status["steps"]["cost_checker"] = "complete"
-        write_status(opp_dir, status)
 
     # ------------------------------------------------------------------
     # Helpers
