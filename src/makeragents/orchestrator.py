@@ -218,7 +218,7 @@ class PipelineRunner:
             taker_output: TakerOutput = taker_future.result()
 
         maker_agent.save_output(maker_result, opp_dir)
-        taker_agent.save_output(taker_output, opp_dir)
+        TakerAgent.save_output(taker_output, slug, run_dir)
 
         status["steps"]["maker"] = "complete"
         status["steps"]["taker"] = "complete"

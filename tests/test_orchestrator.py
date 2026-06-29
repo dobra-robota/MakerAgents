@@ -15,7 +15,7 @@ from makeragents.agents.taker import TakerOutput
 from makeragents.agents.research import ResearchQueryResult, SearchResultsOutput
 from makeragents.config import AppConfig
 from makeragents.orchestrator import PipelineRunner
-from makeragents.run import build_run_metadata, create_run_folder
+from makeragents.run import build_run_metadata, create_run_folder, slugify
 from makeragents.schemas import (
     Confidence,
     EvidenceItem,
@@ -271,8 +271,7 @@ class TestOrchestratorConcurrency:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
-            opp_dir.mkdir(parents=True)
+            opp_dir = run_dir / "opportunities" / slugify(opp.id)
 
             call_order = []
 
@@ -374,8 +373,7 @@ class TestOrchestratorStatusTracking:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
-            opp_dir.mkdir(parents=True)
+            opp_dir = run_dir / "opportunities" / slugify(opp.id)
 
             maker_agent = mock.MagicMock()
             maker_agent.run_with_llm.return_value = MakerResult(
@@ -473,8 +471,8 @@ class TestOrchestratorStatusTracking:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir_a = run_dir / "opportunities" / "test-opportunity-0"
-            opp_dir_b = run_dir / "opportunities" / "test-opportunity-1"
+            opp_dir_a = run_dir / "opportunities" / slugify(opp_a.id)
+            opp_dir_b = run_dir / "opportunities" / slugify(opp_b.id)
             opp_dir_a.mkdir(parents=True)
             opp_dir_b.mkdir(parents=True)
 

@@ -52,18 +52,22 @@ def _mock_search_response(query: str, *, count: int = 10) -> ProviderResponse:
     )
 
 
-def test_run_command_creates_run_folder_and_writes_search_results(
+def test_run_command_creates_run_folder_and_runs_pipeline(
     tmp_path: Path,
 ) -> None:
     with (
         mock.patch(
             "makeragents.cli.load_config", return_value=_mock_config()
-        ) as mock_load,
+        ),
         mock.patch(
-            "makeragents.search.client.SearchClient.search",
-            side_effect=_mock_search_response,
-        ) as mock_search,
+            "makeragents.cli.PipelineRunner",
+        ) as mock_runner_cls,
     ):
+        mock_runner = mock.MagicMock()
+        mock_runner.run.return_value = str(
+            tmp_path / "runs" / "fake" / "final-report.md"
+        )
+        mock_runner_cls.return_value = mock_runner
 
         result = _invoke_in(
             tmp_path,
@@ -75,15 +79,8 @@ def test_run_command_creates_run_folder_and_writes_search_results(
         )
 
     assert result.exit_code == 0, result.output
+    assert mock_runner.run.called
 
-    # Verify load_config was called.
-    mock_load.assert_called_once()
-
-    # Verify ResearchAgent.search used the configured search client without
-    # touching the network.
-    assert mock_search.called
-
-    # Verify run folder was created.
     runs_root = tmp_path / "runs"
     run_dirs = list(runs_root.iterdir())
     assert len(run_dirs) == 1
@@ -93,42 +90,15 @@ def test_run_command_creates_run_folder_and_writes_search_results(
     assert registry_path.is_file()
     assert load_registry(registry_path).model_dump() == load_registry().model_dump()
 
+    metadata_arg = mock_runner.run.call_args.args[1]
+    assert metadata_arg.city == "Łodz"
+    assert metadata_arg.community == "senior citizens"
+    assert metadata_arg.max_opportunities == 5
 
-    report_text = (run_dir / "final-report.md").read_text(encoding="utf-8")
-    assert "No research has been performed yet" in report_text
-    assert not (run_dir / "evidence").exists()
-    assert not (run_dir / "opportunities").exists()
-
-    search_payload = json.loads(
-        (run_dir / "sources" / "search-results.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    first_result = search_payload["query_results"][0]
-    assert first_result["query"] == "senior citizens problems in Łodz"
-    assert first_result["provider"] == "duckduckgo"
-    assert first_result["results"] == [
-        {
-            "title": "Result for senior citizens problems in Łodz",
-            "url": "https://example.test/result",
-            "snippet": "Snippet for senior citizens problems in Łodz",
-        }
-    ]
-    assert first_result["raw"] == {
-        "query": "senior citizens problems in Łodz",
-        "count": 5,
-        "items": [{"title": "raw"}],
-    }
     parsed = yaml.safe_load((run_dir / "run.yaml").read_text(encoding="utf-8"))
     assert parsed["city"] == "Łodz"
-    assert parsed["community"] == "senior citizens"
-    assert parsed["max_opportunities"] == 5
-    assert parsed["queries_per_run"] == 10
-    assert parsed["results_per_query"] == 5
-    assert "timestamp" in parsed
     assert parsed["run_id"] == run_dir.name
 
-    # Verify summary output.
     output = result.output
     assert "Run directory:" in output
     assert "Final report:" in output
@@ -141,15 +111,10 @@ def test_run_command_honors_search_volume_options(tmp_path: Path) -> None:
             "makeragents.cli.load_config", return_value=_mock_config()
         ),
         mock.patch(
-            "makeragents.cli.PipelineRunner"
-        ) as mock_runner_cls,
+            "makeragents.search.client.SearchClient.search",
+            side_effect=_mock_search_response,
+        ),
     ):
-        mock_runner = mock.MagicMock()
-        mock_runner.run.return_value = str(
-            tmp_path / "runs" / "fake" / "final-report.md"
-        )
-        mock_runner_cls.return_value = mock_runner
-
         result = _invoke_in(
             tmp_path,
             "run",
@@ -168,10 +133,6 @@ def test_run_command_honors_search_volume_options(tmp_path: Path) -> None:
     parsed = yaml.safe_load((run_dir / "run.yaml").read_text(encoding="utf-8"))
     assert parsed["queries_per_run"] == 12
     assert parsed["results_per_query"] == 7
-
-    metadata = mock_runner.run.call_args.args[1]
-    assert metadata.queries_per_run == 12
-    assert metadata.results_per_query == 7
 
 
 def test_run_command_honors_max_opportunities(tmp_path: Path) -> None:
@@ -456,8 +417,9 @@ def test_run_command_writes_full_artifact_tree_with_mocked_search(
         md_path.write_text(self._to_markdown(result), encoding="utf-8")
         return json_path, md_path
 
-    def save_taker(self, output, opp_dir: Path):
-        opp_dir = Path(opp_dir)
+    def save_taker(output, opportunity_slug: str, run_dir: Path):
+        opp_dir = Path(run_dir) / "opportunities" / opportunity_slug
+        opp_dir.mkdir(parents=True, exist_ok=True)
         json_path = opp_dir / "taker.json"
         md_path = opp_dir / "taker.md"
         json_path.write_text(
