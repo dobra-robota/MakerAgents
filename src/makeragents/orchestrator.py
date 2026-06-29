@@ -52,6 +52,63 @@ class PipelineRunner:
     # Public entry point
     # ------------------------------------------------------------------
 
+    def run_until_opportunities(
+        self,
+        run_dir: Path,
+        metadata: RunMetadata,
+    ) -> list[Opportunity]:
+        """Execute Research → Evidence → Opportunity and return candidates.
+
+        This entry point is used while the v0 pipeline is still being assembled:
+        it persists evidence, derives opportunity artifacts, and deliberately
+        stops before Maker, Taker, Mediator, Cost Checker, or Report.
+        """
+        opportunities, _ = self._run_research_evidence_opportunity(
+            run_dir,
+            metadata,
+        )
+        return opportunities
+
+    def _run_research_evidence_opportunity(
+        self,
+        run_dir: Path,
+        metadata: RunMetadata,
+    ) -> tuple[list[Opportunity], list[EvidenceItem]]:
+        """Run the shared first three pipeline stages."""
+        city = metadata.city
+        community = metadata.community
+
+        # 1. Research
+        logger.info("Step 1/3: Research — generating and executing queries")
+        research = ResearchAgent(llm_client=self._llm, config=self._config)
+        search_output = research.search(run_dir, city, community)
+
+        # Flatten search results for evidence agent
+        all_search_results: list[SearchResult] = []
+        for qr in search_output.query_results:
+            all_search_results.extend(qr.results)
+
+        # 2. Evidence
+        logger.info("Step 2/3: Evidence — classifying search results")
+        evidence = EvidenceAgent(llm_client=self._llm)
+        evidence_items = evidence.process(
+            all_search_results,
+            city=city,
+            community=community,
+        )
+        evidence.save_evidence(evidence_items, run_dir)
+
+        # 3. Opportunity
+        logger.info("Step 3/3: Opportunity — deriving candidate opportunities")
+        opportunity_agent = OpportunityAgent(
+            max_opportunities=metadata.max_opportunities,
+            llm_client=self._llm,
+            city=city,
+            community=community,
+        )
+        opportunities = opportunity_agent.process(evidence_items, run_dir)
+        return opportunities, evidence_items
+
     def run(
         self,
         run_dir: Path,
@@ -70,36 +127,10 @@ class PipelineRunner:
         city = metadata.city
         community = metadata.community
 
-        # 1. Research
-        logger.info("Step 1/7: Research — generating and executing queries")
-        research = ResearchAgent(llm_client=self._llm, config=self._config)
-        search_output = research.search(run_dir, city, community)
-
-        # Flatten search results for evidence agent
-        all_search_results: list[SearchResult] = []
-        for qr in search_output.query_results:
-            all_search_results.extend(qr.results)
-
-        # 2. Evidence
-        logger.info("Step 2/7: Evidence — classifying search results")
-        evidence = EvidenceAgent(llm_client=self._llm)
-        evidence_items = evidence.process(
-            all_search_results,
-            city=city,
-            community=community,
+        opportunities, evidence_items = self._run_research_evidence_opportunity(
+            run_dir,
+            metadata,
         )
-        evidence.save_evidence(evidence_items, run_dir)
-
-        # 3. Opportunity
-        logger.info("Step 3/7: Opportunity — deriving candidate opportunities")
-        opportunity_agent = OpportunityAgent(
-            metadata.max_opportunities,
-            llm_client=self._llm,
-            city=city,
-            community=community,
-        )
-        opportunities = opportunity_agent.process(evidence_items, run_dir)
-
         # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
         max_opps = min(len(opportunities), metadata.max_opportunities)
         selected = opportunities[:max_opps]

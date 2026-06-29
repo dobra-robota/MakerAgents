@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from makeragents.schemas import RunMetadata
+from makeragents.schemas import Opportunity, RunMetadata
 
 RUN_YAML_FILENAME = "run.yaml"
 FINAL_REPORT_FILENAME = "final-report.md"
@@ -30,6 +30,11 @@ def slugify(value: str) -> str:
     ascii_text = ascii_text.lower()
     ascii_text = re.sub(r"[^a-z0-9]+", "-", ascii_text)
     return ascii_text.strip("-") or _SLUG_FALLBACK
+
+
+def opportunity_artifact_slug(opportunity: Opportunity) -> str:
+    """Return the directory slug for one opportunity artifact bundle."""
+    return slugify(opportunity.id)
 
 
 def build_run_metadata(

@@ -11,7 +11,7 @@ import yaml
 
 from makeragents.llm import ChatMessage, LLMClient
 from makeragents.prompts import load_prompt
-from makeragents.run import slugify
+from makeragents.run import opportunity_artifact_slug, slugify
 from makeragents.schemas import EvidenceItem, Opportunity, OpportunityType
 
 logger = logging.getLogger(__name__)
@@ -255,7 +255,7 @@ class OpportunityAgent:
 
         Returns the path of the written YAML file.
         """
-        slug = slugify(opportunity.id)
+        slug = opportunity_artifact_slug(opportunity)
         opp_dir = run_dir / "opportunities" / slug
         opp_dir.mkdir(parents=True, exist_ok=True)
 

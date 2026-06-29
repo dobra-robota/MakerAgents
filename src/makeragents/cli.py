@@ -54,7 +54,7 @@ def run(
         5, min=1, help="Maximum number of opportunities to surface."
     ),
 ) -> None:
-    """Research a city + community and produce a ranked opportunity report."""
+    """Research a city + community and write candidate opportunity artifacts."""
 
     # 1. Load config and validate required API keys.
     config = load_config()
@@ -74,13 +74,13 @@ def run(
     )
     run_dir = create_run_folder(metadata)
 
-    # 3. Run the full pipeline.
+    # 3. Run through opportunity artifact generation only.
     runner = PipelineRunner(config=config)
-    final_report = runner.run(run_dir, metadata)
+    opportunities = runner.run_until_opportunities(run_dir, metadata)
 
     # 4. Echo a short summary.
     typer.echo(f"Run directory: {run_dir}")
-    typer.echo(f"Final report:  {final_report}")
+    typer.echo(f"Opportunities written: {len(opportunities)}")
     typer.echo(
         f"Completed run for '{city} / {community}' "
         f"(max opportunities: {max_opportunities})."
