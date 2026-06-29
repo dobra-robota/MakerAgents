@@ -12,6 +12,7 @@ from makeragents.orchestrator import PipelineRunner
 from makeragents.retry import (
     PIPELINE_STEPS,
     _RETRYABLE_STEPS,
+    RetryPrerequisiteError,
     get_incomplete_steps,
     load_opportunity_for_retry,
     mark_steps_complete,
@@ -193,7 +194,7 @@ def retry(
     # Load on-disk state needed by downstream agents.
     try:
         opp, evidence_items = load_opportunity_for_retry(opp_dir, run_dir)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, RetryPrerequisiteError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
