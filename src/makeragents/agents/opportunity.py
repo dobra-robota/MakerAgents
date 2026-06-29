@@ -33,7 +33,7 @@ class OpportunityAgent:
     impact is high, weak-evidence opportunities are allowed but flagged.
 
     Generated opportunities are written to the run folder as
-    ``opportunities/<slug>/opportunity.yaml``.
+    ``opportunities/<slug>/opportunity.yaml`` plus a concise ``README.md``.
     """
 
     def __init__(
@@ -251,7 +251,7 @@ class OpportunityAgent:
 
     @staticmethod
     def _persist_opportunity(opportunity: Opportunity, run_dir: Path) -> Path:
-        """Write a single opportunity as ``opportunities/<slug>/opportunity.yaml``.
+        """Write a single opportunity folder with YAML and README artifacts.
 
         Returns the path of the written YAML file.
         """
@@ -263,6 +263,9 @@ class OpportunityAgent:
         dest = opp_dir / "opportunity.yaml"
         with dest.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
+
+        readme = build_opportunity_readme(opportunity)
+        (opp_dir / "README.md").write_text(readme, encoding="utf-8")
         return dest
 
 
@@ -362,6 +365,40 @@ def _derive_beneficiaries(
             seen_labels.add(label)
 
     return found or ["community members"]
+
+
+def build_opportunity_readme(opportunity: Opportunity) -> str:
+    """Build the generated Markdown summary for an opportunity folder."""
+    lines = [
+        f"# {opportunity.title}",
+        "",
+        f"- **Type**: `{opportunity.type.value}`",
+        f"- **Speculative**: {'Yes — needs stronger evidence before action.' if opportunity.speculative else 'No'}",
+        "",
+        "## Pain Summary",
+        "",
+        opportunity.pain_summary,
+        "",
+        "## Beneficiaries",
+        "",
+    ]
+
+    lines.extend(f"- {beneficiary}" for beneficiary in opportunity.who_benefits)
+    lines.extend(["", "## Evidence", ""])
+
+    if opportunity.evidence_ids:
+        lines.extend(f"- `{evidence_id}`" for evidence_id in opportunity.evidence_ids)
+    else:
+        lines.append("- None recorded")
+
+    lines.extend(["", "## Recommended Next Step", ""])
+    if opportunity.verdict is None:
+        lines.append("Mediator verdict pending — review after mediator evaluation.")
+    else:
+        lines.append(f"Follow mediator verdict: `{opportunity.verdict.value}`.")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------

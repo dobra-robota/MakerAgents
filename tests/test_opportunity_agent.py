@@ -311,6 +311,22 @@ class TestOpportunityAgentProcess:
         assert parsed["id"].startswith("OPP-")
         assert parsed["speculative"] is True
 
+
+    def test_writes_readme_to_opportunity_folder(
+        self, gov_evidence: EvidenceItem, tmp_path: Path
+    ) -> None:
+        agent = OpportunityAgent()
+        agent.process([gov_evidence], tmp_path)
+
+        readme_files = list((tmp_path / "opportunities").rglob("README.md"))
+        assert len(readme_files) == 1
+
+        content = readme_files[0].read_text(encoding="utf-8")
+        assert "Public information guide" in content
+        assert "`EV-001`" in content
+        assert "Speculative**: Yes" in content
+        assert "Mediator verdict pending" in content
+
     def test_multiple_opportunities_each_have_own_folder(
         self, tmp_path: Path
     ) -> None:
@@ -328,6 +344,8 @@ class TestOpportunityAgentProcess:
         for folder in folders:
             yaml_path = folder / "opportunity.yaml"
             assert yaml_path.is_file()
+            readme_path = folder / "README.md"
+            assert readme_path.is_file()
 
     def test_empty_evidence_returns_empty_list(self, tmp_path: Path) -> None:
         agent = OpportunityAgent()
