@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 from makeragents.agents.maker import MakerResult
-from makeragents.agents.mediator import MediatorResult
 from makeragents.agents.taker import TakerOutput
 from makeragents.config import AppConfig
 from makeragents.orchestrator import PipelineRunner
@@ -21,9 +18,7 @@ from makeragents.schemas import (
     EvidenceType,
     Opportunity,
     OpportunityType,
-    RunMetadata,
     SourceType,
-    Verdict,
 )
 
 
@@ -69,8 +64,8 @@ def _make_opportunity(idx: int) -> Opportunity:
 class TestOrchestratorTopology:
     """Verify the pipeline runs the correct sequence and writes artifacts."""
 
-    def test_no_opportunities_still_produces_report(self) -> None:
-        """When opportunity agent returns nothing, the report still runs."""
+    def test_no_opportunities_returns_existing_report_path(self) -> None:
+        """When there are no opportunities, per-opportunity stages are skipped."""
         runner = PipelineRunner(
             config=AppConfig(deepseek_api_key="test-key"),
         )
@@ -78,9 +73,8 @@ class TestOrchestratorTopology:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
 
-            # Mock all agents to return empty results
+            # Mock pre-opportunity agents to return empty results
             with (
-                mock.patch.object(runner, "run", wraps=runner.run) as wrapped_run,
                 mock.patch(
                     "makeragents.orchestrator.ResearchAgent"
                 ) as mock_research,
@@ -103,8 +97,7 @@ class TestOrchestratorTopology:
 
                 result = runner.run(run_dir, metadata)
 
-            # Should still run and return a report path
-            assert "final-report.md" in result
+            assert result == str(run_dir / "final-report.md")
             assert (run_dir / "final-report.md").exists()
 
     def test_writes_opportunity_artifacts(self) -> None:
@@ -133,26 +126,25 @@ class TestOrchestratorTopology:
             assert opp_yaml.exists()
 
 
-class TestOrchestratorConcurrency:
-    """Verify Maker/Taker run in parallel and opportunities are concurrent."""
+class TestOrchestratorSequencing:
+    """Verify Maker/Taker sequencing and scoped evidence selection."""
 
-    def test_maker_taker_parallel(self) -> None:
-        """Maker and Taker are submitted concurrently."""
+    def test_taker_runs_after_maker_artifacts_with_selected_evidence(self) -> None:
+        """Taker receives Maker scores only after maker artifacts are saved."""
         opp = _make_opportunity(0)
-        evidence = [_make_evidence_item(0)]
+        evidence = [_make_evidence_item(0), _make_evidence_item(1)]
         runner = PipelineRunner(
             config=AppConfig(deepseek_api_key="test-key"),
         )
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
-            opp_dir.mkdir(parents=True)
+            opp_dir = run_dir / "opportunities" / "opp-000"
 
             call_order = []
 
             def capture_maker(*a, **kw):
-                call_order.append("maker")
+                call_order.append("maker_run")
                 return MakerResult(
                     opportunity_id=opp.id,
                     maker_score=75.0,
@@ -165,10 +157,26 @@ class TestOrchestratorConcurrency:
                     harm_risk_score=20.0,
                     ability_to_act_score=55.0,
                     rank_score=0.0,
+                    evidence_ids=["ev-000"],
+                    summary="Maker summary",
                 )
 
-            def capture_taker(*a, **kw):
-                call_order.append("taker")
+            def save_maker(result, path):
+                call_order.append("maker_save")
+                assert path == opp_dir
+                json_path = path / "maker.json"
+                md_path = path / "maker.md"
+                json_path.write_text("{}", encoding="utf-8")
+                md_path.write_text("maker", encoding="utf-8")
+                return json_path, md_path
+
+            def capture_taker(opportunity, selected_evidence, *a, **kw):
+                call_order.append("taker_run")
+                assert "maker_save" in call_order
+                assert opportunity.scores is not None
+                assert opportunity.scores.maker_score == 75.0
+                assert [item.id for item in selected_evidence] == ["ev-000"]
+                assert opportunity.evidence_ids == ["ev-000"]
                 return TakerOutput(
                     opportunity_id=opp.id,
                     taker_score=30.0,
@@ -180,34 +188,21 @@ class TestOrchestratorConcurrency:
                         "dependency_risk": 10.0,
                         "harm_risk": 10.0,
                     },
-                    evidence_ids=[],
+                    evidence_ids=["ev-000"],
                     summary="Risk summary",
                 )
 
+            def save_taker(result, path):
+                call_order.append("taker_save")
+                assert path == opp_dir
+
             maker_agent = mock.MagicMock()
             maker_agent.run_with_llm.side_effect = capture_maker
-            maker_agent.save_output.return_value = None
+            maker_agent.save_output.side_effect = save_maker
 
             taker_agent = mock.MagicMock()
             taker_agent.run_with_llm.side_effect = capture_taker
-            taker_agent.save_output.return_value = None
-
-            mediator = mock.MagicMock()
-            mediator_result = MediatorResult(
-                opportunity_id=opp.id,
-                verdict=Verdict.WATCH,
-                maker_score=75.0,
-                taker_score=30.0,
-                balance_summary="Balanced",
-                evidence_ids=[],
-                summary="Summary",
-            )
-            mediator.run_with_llm.return_value = mediator_result
-            mediator.save_output.return_value = None
-
-            cost = mock.MagicMock()
-            cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
+            taker_agent.save_output.side_effect = save_taker
 
             with (
                 mock.patch(
@@ -218,22 +213,17 @@ class TestOrchestratorConcurrency:
                     "makeragents.orchestrator.TakerAgent",
                     return_value=taker_agent,
                 ),
-                mock.patch(
-                    "makeragents.orchestrator.MediatorAgent",
-                    return_value=mediator,
-                ),
-                mock.patch(
-                    "makeragents.orchestrator.CostCheckerAgent",
-                    return_value=cost,
-                ),
             ):
                 runner._process_one_opportunity(
                     opp, evidence, run_dir, "Lodz", "senior"
                 )
 
-            # Both maker and taker were called
-            assert "maker" in call_order
-            assert "taker" in call_order
+            assert call_order == [
+                "maker_run",
+                "maker_save",
+                "taker_run",
+                "taker_save",
+            ]
 
 
 class TestOrchestratorStatusTracking:
@@ -249,8 +239,7 @@ class TestOrchestratorStatusTracking:
         metadata = build_run_metadata(city="Lodz", community="senior")
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = create_run_folder(metadata, base_dir=Path(tmp))
-            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
-            opp_dir.mkdir(parents=True)
+            opp_dir = run_dir / "opportunities" / "opp-000"
 
             maker_agent = mock.MagicMock()
             maker_agent.run_with_llm.return_value = MakerResult(
@@ -265,8 +254,17 @@ class TestOrchestratorStatusTracking:
                 harm_risk_score=20.0,
                 ability_to_act_score=55.0,
                 rank_score=0.0,
+                evidence_ids=["ev-000"],
             )
-            maker_agent.save_output.return_value = None
+
+            def save_maker(result, path):
+                json_path = path / "maker.json"
+                md_path = path / "maker.md"
+                json_path.write_text("{}", encoding="utf-8")
+                md_path.write_text("maker", encoding="utf-8")
+                return json_path, md_path
+
+            maker_agent.save_output.side_effect = save_maker
 
             taker_agent = mock.MagicMock()
             taker_agent.run_with_llm.return_value = TakerOutput(
@@ -280,27 +278,10 @@ class TestOrchestratorStatusTracking:
                     "dependency_risk": 20.0,
                     "harm_risk": 20.0,
                 },
-                evidence_ids=[],
+                evidence_ids=["ev-000"],
                 summary="Risk",
             )
             taker_agent.save_output.return_value = None
-
-            mediator = mock.MagicMock()
-            mediator_result = MediatorResult(
-                opportunity_id=opp.id,
-                verdict=Verdict.WATCH,
-                maker_score=75.0,
-                taker_score=30.0,
-                balance_summary="Balanced",
-                evidence_ids=[],
-                summary="Summary",
-            )
-            mediator.run_with_llm.return_value = mediator_result
-            mediator.save_output.return_value = None
-
-            cost = mock.MagicMock()
-            cost.run_with_llm.return_value = mock.MagicMock()
-            cost.save_output.return_value = None
 
             with (
                 mock.patch(
@@ -311,28 +292,19 @@ class TestOrchestratorStatusTracking:
                     "makeragents.orchestrator.TakerAgent",
                     return_value=taker_agent,
                 ),
-                mock.patch(
-                    "makeragents.orchestrator.MediatorAgent",
-                    return_value=mediator,
-                ),
-                mock.patch(
-                    "makeragents.orchestrator.CostCheckerAgent",
-                    return_value=cost,
-                ),
             ):
                 runner._process_one_opportunity(
                     opp, evidence, run_dir, "Lodz", "senior"
                 )
 
-            # Status file exists and has all steps complete
+            # Status file exists and stops at Taker for this issue scope.
             status_path = opp_dir / "status.yaml"
             assert status_path.exists()
 
             import yaml
             status = yaml.safe_load(status_path.read_text())
             assert status["opportunity_id"] == opp.id
-            for step in [
-                "research", "evidence", "opportunity",
-                "maker", "taker", "mediator", "cost_checker",
-            ]:
+            for step in ["research", "evidence", "opportunity", "maker", "taker"]:
                 assert status["steps"][step] == "complete", f"{step} not complete"
+            for step in ["mediator", "cost_checker"]:
+                assert status["steps"][step] == "incomplete", f"{step} should not run"

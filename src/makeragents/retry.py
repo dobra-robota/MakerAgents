@@ -176,10 +176,10 @@ def run_retry_step(
     slug = opp_dir.name
 
     if step == "maker":
-        return _run_maker_step(opportunity, evidence_items, run_dir)
+        return _run_maker_step(opportunity, evidence_items, opp_dir)
 
     if step == "taker":
-        return _run_taker_step(opportunity, evidence_items, slug, run_dir)
+        return _run_taker_step(opportunity, evidence_items, opp_dir)
 
     if step == "mediator":
         _run_mediator_step(opportunity, run_dir)
@@ -238,12 +238,12 @@ def _apply_taker_scores(
 def _run_maker_step(
     opportunity: Opportunity,
     evidence_items: list[EvidenceItem],
-    run_dir: Path,
+    opp_dir: Path,
 ) -> Opportunity:
     """Run the Maker Agent and return the opportunity with updated scores."""
     agent = MakerAgent()
     result = agent.run(opportunity, evidence_items)
-    agent.save_output(result, run_dir)
+    agent.save_output(result, opp_dir)
 
     scores = ScoreSet(
         validity_score=result.validity_score,
@@ -265,15 +265,14 @@ def _run_maker_step(
 def _run_taker_step(
     opportunity: Opportunity,
     evidence_items: list[EvidenceItem],
-    slug: str,
-    run_dir: Path,
+    opp_dir: Path,
 ) -> Opportunity:
     """Run the Taker Agent and return the opportunity with updated scores."""
     agent = TakerAgent()
     output, updated_opportunity = agent.analyze_and_update(
         opportunity, evidence_items
     )
-    TakerAgent.save_output(output, slug, run_dir)
+    TakerAgent.save_output(output, opp_dir)
     return updated_opportunity
 
 

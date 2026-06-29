@@ -13,7 +13,7 @@ Usage
 -----
     taker = TakerAgent()
     result = taker.analyze(opportunity, evidence_items)
-    taker.save_output(opportunity_slug, run_dir)
+    taker.save_output(result, opportunity_dir)
 """
 
 from __future__ import annotations
@@ -208,6 +208,15 @@ class TakerAgent:
     ) -> None:
         self._llm_client = llm_client
 
+    @staticmethod
+    def _require_maker_scores(opportunity: Opportunity) -> None:
+        """Ensure Maker has populated scores before Taker analysis."""
+        if opportunity.scores is None:
+            raise ValueError(
+                "Opportunity must have scores set before Taker analysis. "
+                "The Maker Agent must run first."
+            )
+
     def analyze(
         self,
         opportunity: Opportunity,
@@ -229,9 +238,9 @@ class TakerAgent:
         TakerOutput
             The structured analysis result.
         """
+        self._require_maker_scores(opportunity)
         if evidence_items is None:
             evidence_items = []
-
         risk_breakdown = self._score_risks(opportunity, evidence_items)
         taker_score = self._calculate_taker_score(risk_breakdown)
         taker_confidence = self._determine_confidence(opportunity, evidence_items)
@@ -677,26 +686,23 @@ class TakerAgent:
     @staticmethod
     def save_output(
         output: TakerOutput,
-        opportunity_slug: str,
-        run_dir: Path,
+        opportunity_dir: Path | str,
     ) -> tuple[Path, Path]:
-        """Write ``taker.json`` and ``taker.md`` to the opportunity folder.
+        """Write ``taker.json`` and ``taker.md`` to an opportunity folder.
 
         Parameters
         ----------
         output : TakerOutput
             The analysis result to persist.
-        opportunity_slug : str
-            Slug identifying the opportunity within the run.
-        run_dir : Path
-            Path to the run directory (``runs/<run-id>/``).
+        opportunity_dir : Path | str
+            Path to the opportunity directory.
 
         Returns
         -------
         tuple[Path, Path]
             ``(json_path, md_path)`` of the written files.
         """
-        opportunity_dir = run_dir / "opportunities" / opportunity_slug
+        opportunity_dir = Path(opportunity_dir)
         opportunity_dir.mkdir(parents=True, exist_ok=True)
 
         json_path = opportunity_dir / "taker.json"

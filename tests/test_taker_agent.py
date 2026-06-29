@@ -47,6 +47,24 @@ def base_scores() -> ScoreSet:
     )
 
 
+def _maker_scores() -> ScoreSet:
+    """Return scores representing a completed Maker stage."""
+    return ScoreSet(
+        validity_score=75,
+        maker_score=70,
+        maker_confidence=Confidence.MEDIUM,
+        taker_score=0,
+        taker_confidence=Confidence.LOW,
+        people_helped_score=65,
+        severity_score=55,
+        impact_score=60,
+        intervention_ease_score=70,
+        harm_risk_score=15,
+        ability_to_act_score=50,
+        rank_score=50.0,
+    )
+
+
 @pytest.fixture
 def vulnerable_opportunity(base_scores: ScoreSet) -> Opportunity:
     """A PUBLICE_GUIDE targeting vulnerable groups with mixed evidence."""
@@ -576,9 +594,8 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        json_path, md_path = taker_agent.save_output(
-            output, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
+        opportunity_dir = tmp_path / "senior-services-guide"
+        json_path, md_path = taker_agent.save_output(output, opportunity_dir)
 
         # Check JSON file.
         assert json_path.exists()
@@ -615,11 +632,10 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        taker_agent.save_output(
-            output, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
-        assert (tmp_path / "opportunities" / "senior-services-guide" / "taker.json").exists()
-        assert (tmp_path / "opportunities" / "senior-services-guide" / "taker.md").exists()
+        opportunity_dir = tmp_path / "senior-services-guide"
+        taker_agent.save_output(output, opportunity_dir)
+        assert (opportunity_dir / "taker.json").exists()
+        assert (opportunity_dir / "taker.md").exists()
 
     def test_paths_returned_are_correct(
         self,
@@ -629,11 +645,10 @@ class TestSaveOutput:
         tmp_path: Path,
     ) -> None:
         output = taker_agent.analyze(vulnerable_opportunity, strong_evidence_items)
-        json_path, md_path = taker_agent.save_output(
-            output, opportunity_slug="slug", run_dir=tmp_path
-        )
-        assert json_path == tmp_path / "opportunities" / "slug" / "taker.json"
-        assert md_path == tmp_path / "opportunities" / "slug" / "taker.md"
+        opportunity_dir = tmp_path / "slug"
+        json_path, md_path = taker_agent.save_output(output, opportunity_dir)
+        assert json_path == opportunity_dir / "taker.json"
+        assert md_path == opportunity_dir / "taker.md"
 
 
 # ------------------------------------------------------------------
@@ -900,6 +915,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=["EV-001"],
             speculative=False,
+            scores=_maker_scores(),
         )
         evidence = [
             EvidenceItem(
@@ -933,6 +949,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=["EV-001"],
             speculative=False,
+            scores=_maker_scores(),
         )
         evidence = [
             EvidenceItem(
@@ -966,6 +983,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=[],
             speculative=False,
+            scores=_maker_scores(),
         )
         result = agent.run_with_llm(opp)
         assert result.taker_score == 100.0
@@ -982,6 +1000,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=[],
             speculative=False,
+            scores=_maker_scores(),
         )
         result = agent.run_with_llm(opp)
         assert result.taker_score == 0.0
@@ -1022,6 +1041,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=["EV-001"],
             speculative=False,
+            scores=_maker_scores(),
         )
         evidence = [
             EvidenceItem(
@@ -1080,6 +1100,7 @@ class TestTakerAgentRunWithLLM:
             who_benefits=["testers"],
             evidence_ids=["EV-001"],
             speculative=False,
+            scores=_maker_scores(),
         )
         evidence = [
             EvidenceItem(
@@ -1194,9 +1215,8 @@ class TestTakerAgentRunWithLLM:
         result = agent.run_with_llm(
             vulnerable_opportunity, strong_evidence_items
         )
-        json_path, md_path = agent.save_output(
-            result, opportunity_slug="senior-services-guide", run_dir=tmp_path
-        )
+        opportunity_dir = tmp_path / "senior-services-guide"
+        json_path, md_path = agent.save_output(result, opportunity_dir)
         data = _json.loads(json_path.read_text(encoding="utf-8"))
         assert "claims" in data
         assert isinstance(data["claims"], list)

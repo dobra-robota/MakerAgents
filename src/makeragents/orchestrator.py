@@ -1,8 +1,8 @@
 """Pipeline orchestrator: wires agents end-to-end via the PRD §6 topology.
 
 Research → Evidence → Opportunity
-  → Maker / Taker (parallel, per opportunity)
-    → Mediator → Cost Checker → Report
+  → Maker (per opportunity)
+    → Taker (after Maker scores and artifacts exist)
 
 Writes the complete PRD §15 folder layout for a run, including per-opportunity
 artifacts and ``status.yaml`` for resumability.
@@ -11,25 +11,27 @@ artifacts and ``status.yaml`` for resumability.
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import logging
 from pathlib import Path
-from typing import Any
 
 import yaml
 
-from makeragents.agents.cost_checker import CostCheckerAgent
 from makeragents.agents.evidence import EvidenceAgent
 from makeragents.agents.maker import MakerAgent, MakerResult
-from makeragents.agents.mediator import MediatorAgent
 from makeragents.agents.opportunity import OpportunityAgent
-from makeragents.agents.report import ReportAgent
 from makeragents.agents.research import ResearchAgent
 from makeragents.agents.taker import TakerAgent, TakerOutput
 from makeragents.config import AppConfig, load_config
 from makeragents.llm.client import LLMClient
 from makeragents.retry import PIPELINE_STEPS, write_status
-from makeragents.schemas import EvidenceItem, Opportunity, RunMetadata
+from makeragents.run import opportunity_artifact_slug
+from makeragents.schemas import (
+    Confidence,
+    EvidenceItem,
+    Opportunity,
+    RunMetadata,
+    ScoreSet,
+)
 from makeragents.search.providers import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -100,7 +102,8 @@ class PipelineRunner:
         )
         opportunities = opportunity_agent.process(evidence_items, run_dir)
 
-        # 4. Per-opportunity: Maker + Taker → Mediator → Cost Checker
+        # 4. Per-opportunity: Maker → Taker. Downstream stages are separate
+        # issue scopes and are intentionally not run here.
         max_opps = min(len(opportunities), metadata.max_opportunities)
         selected = opportunities[:max_opps]
 
@@ -113,12 +116,7 @@ class PipelineRunner:
                 "No opportunities derived — skipping per-opportunity steps"
             )
 
-        # 5. Report
-        logger.info("Step 7/7: Report — generating final report")
-        report = ReportAgent()
-        report_path = report.generate(run_dir)
-
-        return report_path
+        return str(run_dir / "final-report.md")
 
     # ------------------------------------------------------------------
     # Per-opportunity processing
@@ -132,7 +130,7 @@ class PipelineRunner:
         city: str,
         community: str,
     ) -> None:
-        """Process opportunities concurrently: Maker/Taker → Mediator → Cost."""
+        """Process opportunities concurrently: Maker → Taker."""
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = {
                 executor.submit(
@@ -163,10 +161,9 @@ class PipelineRunner:
         city: str,
         community: str,
     ) -> None:
-        """Run Maker/Taker → Mediator → Cost for a single opportunity."""
-        from makeragents.run import slugify
+        """Run Maker, then Taker, for a single opportunity."""
 
-        slug = slugify(opp.title) or opp.id
+        slug = opportunity_artifact_slug(opp)
         opp_dir = run_dir / "opportunities" / slug
         opp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,87 +180,87 @@ class PipelineRunner:
             status["steps"][step] = "complete"
         write_status(opp_dir, status)
 
-        # 4a. Maker + Taker in parallel
-        logger.info("  Opportunity %s: Maker + Taker (parallel)", opp.id)
+        # 4a. Maker must finish and persist artifacts before Taker runs.
+        logger.info("  Opportunity %s: Maker", opp.id)
 
         maker_agent = MakerAgent(llm_client=self._llm)
-        taker_agent = TakerAgent(llm_client=self._llm)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            maker_future = executor.submit(
-                maker_agent.run_with_llm,
-                opp,
-                evidence_items,
-                city=city,
-                community=community,
+        maker_result: MakerResult = maker_agent.run_with_llm(
+            opp,
+            evidence_items,
+            city=city,
+            community=community,
+        )
+        maker_json, maker_md = maker_agent.save_output(maker_result, opp_dir)
+        if not (maker_json.is_file() and maker_md.is_file()):
+            raise RuntimeError(
+                f"Maker artifacts missing for opportunity {opp.id}"
             )
-            taker_future = executor.submit(
-                taker_agent.run_with_llm,
-                opp,
-                evidence_items,
-                city=city,
-                community=community,
-            )
-            maker_result: MakerResult = maker_future.result()
-            taker_output: TakerOutput = taker_future.result()
-
-        maker_agent.save_output(maker_result, opp_dir)
-        taker_agent.save_output(taker_output, opp_dir)
 
         status["steps"]["maker"] = "complete"
+        write_status(opp_dir, status)
+
+        scored_opp = self._with_maker_scores(opp, maker_result)
+        selected_evidence = self._select_evidence_by_ids(
+            evidence_items,
+            maker_result.evidence_ids or opp.evidence_ids,
+        )
+        taker_opp = scored_opp.model_copy(
+            update={"evidence_ids": [item.id for item in selected_evidence]}
+        )
+
+        # 4b. Taker runs only after Maker scores/artifacts are available.
+        logger.info("  Opportunity %s: Taker", opp.id)
+        taker_agent = TakerAgent(llm_client=self._llm)
+        maker_summary = (
+            maker_result.value_add_argument
+            or maker_result.summary
+            or str(maker_result)
+        )
+        taker_output: TakerOutput = taker_agent.run_with_llm(
+            taker_opp,
+            selected_evidence,
+            city=city,
+            community=community,
+            maker_summary=maker_summary,
+        )
+        taker_agent.save_output(taker_output, opp_dir)
+
         status["steps"]["taker"] = "complete"
         write_status(opp_dir, status)
 
-        # 4b. Mediator
-        logger.info("  Opportunity %s: Mediator", opp.id)
-        mediator = MediatorAgent()
-        maker_summary = getattr(
-            maker_result, "value_add_argument", str(maker_result)
+    @staticmethod
+    def _with_maker_scores(
+        opp: Opportunity,
+        result: MakerResult,
+    ) -> Opportunity:
+        """Return *opp* with Maker scores attached for Taker prerequisites."""
+        scores = ScoreSet(
+            validity_score=result.validity_score,
+            maker_score=result.maker_score,
+            maker_confidence=result.maker_confidence,
+            taker_score=0.0,
+            taker_confidence=Confidence.LOW,
+            people_helped_score=result.people_helped_score,
+            severity_score=result.severity_score,
+            impact_score=result.impact_score,
+            intervention_ease_score=result.intervention_ease_score,
+            harm_risk_score=result.harm_risk_score,
+            ability_to_act_score=result.ability_to_act_score,
+            rank_score=result.rank_score,
         )
-        taker_summary = getattr(taker_output, "summary", str(taker_output))
-        try:
-            mediation = mediator.run_with_llm(
-                city=city,
-                community=community,
-                opportunity=opp,
-                maker_summary=maker_summary,
-                taker_summary=taker_summary,
-                llm_client=self._llm,
-            )
-        except Exception:
-            logger.warning(
-                "Mediator LLM call failed — falling back to heuristic"
-            )
-            mediation = mediator.run(opp)
-        mediator.save_output(mediation, opp_dir)
-        status["steps"]["mediator"] = "complete"
-        write_status(opp_dir, status)
+        return opp.model_copy(update={"scores": scores})
 
-        # 4c. Cost Checker
-        logger.info("  Opportunity %s: Cost Checker", opp.id)
-        cost = CostCheckerAgent()
-        verdict = getattr(mediation, "verdict", None)
-        verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
-        intervention = getattr(
-            mediation, "safe_intervention_shape", ""
-        )
-        try:
-            estimate = cost.run_with_llm(
-                self._llm,
-                opp,
-                city=city,
-                community=community,
-                verdict=verdict_str,
-                intervention_shape=intervention,
-            )
-        except Exception:
-            logger.warning(
-                "Cost Checker LLM call failed — falling back to heuristic"
-            )
-            estimate = cost.estimate(opp)
-        cost.save_output(estimate, opp_dir)
-        status["steps"]["cost_checker"] = "complete"
-        write_status(opp_dir, status)
+    @staticmethod
+    def _select_evidence_by_ids(
+        evidence_items: list[EvidenceItem],
+        evidence_ids: list[str],
+    ) -> list[EvidenceItem]:
+        """Return evidence items matching *evidence_ids*, preserving input order."""
+        wanted = set(evidence_ids)
+        if not wanted:
+            return []
+        return [item for item in evidence_items if item.id in wanted]
+
 
     # ------------------------------------------------------------------
     # Helpers
