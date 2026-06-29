@@ -336,3 +336,67 @@ class TestOrchestratorStatusTracking:
                 "maker", "taker", "mediator", "cost_checker",
             ]:
                 assert status["steps"][step] == "complete", f"{step} not complete"
+
+
+class TestOrchestratorFinalReport:
+    """Verify final-report.md generation from mocked pipeline data."""
+
+    def test_run_generates_real_final_report(self) -> None:
+        """Full pipeline with mocked agents produces final-report.md with expected content."""
+        import yaml
+
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+            evidence_items = [_make_evidence_item(0)]
+            opp = _make_opportunity(0)
+
+            # Mock all agents
+            research = mock.MagicMock()
+            research.search.return_value = mock.MagicMock(query_results=[])
+
+            evidence = mock.MagicMock()
+            evidence.process.return_value = evidence_items
+            evidence.save_evidence.return_value = None
+
+            opportunity_agent = mock.MagicMock()
+            opportunity_agent.process.return_value = [opp]
+
+            with (
+                mock.patch(
+                    "makeragents.orchestrator.ResearchAgent",
+                    return_value=research,
+                ),
+                mock.patch(
+                    "makeragents.orchestrator.EvidenceAgent",
+                    return_value=evidence,
+                ),
+                mock.patch(
+                    "makeragents.orchestrator.OpportunityAgent",
+                    return_value=opportunity_agent,
+                ),
+                mock.patch.object(
+                    runner, "_process_opportunities", return_value=None
+                ),
+            ):
+                report_path = runner.run(run_dir, metadata)
+
+            # Report file exists
+            report_file = Path(report_path)
+            assert report_file.exists()
+            content = report_file.read_text()
+
+            # Expected content
+            assert "Lodz" in content
+            assert "senior" in content
+            assert "final report" in content.lower() or "Final Report" in content
+
+            # Appendix files exist
+            appendix = run_dir / "appendix"
+            assert appendix.is_dir()
+            assert (appendix / "rejected-opportunities.md").exists()
+            assert (appendix / "incomplete-opportunities.md").exists()
