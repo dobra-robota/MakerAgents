@@ -336,3 +336,95 @@ class TestOrchestratorStatusTracking:
                 "maker", "taker", "mediator", "cost_checker",
             ]:
                 assert status["steps"][step] == "complete", f"{step} not complete"
+
+
+class TestOrchestratorCostCheckerArtifacts:
+    """Verify cost.json and cost.md are written after Mediator."""
+
+    def test_cost_artifacts_written(self) -> None:
+        """Cost Checker writes cost.json with POC type and estimate fields."""
+        opp = _make_opportunity(0)
+        evidence = [_make_evidence_item(0)]
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+        )
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+            opp_dir = run_dir / "opportunities" / "test-opportunity-0"
+            opp_dir.mkdir(parents=True)
+
+            maker_agent = mock.MagicMock()
+            maker_agent.run_with_llm.return_value = MakerResult(
+                opportunity_id=opp.id,
+                maker_score=75.0,
+                maker_confidence=Confidence.MEDIUM,
+                people_helped_score=70.0,
+                severity_score=60.0,
+                impact_score=65.0,
+                validity_score=80.0,
+                intervention_ease_score=50.0,
+                harm_risk_score=20.0,
+                ability_to_act_score=55.0,
+                rank_score=0.0,
+            )
+            maker_agent.save_output.return_value = None
+
+            taker_agent = mock.MagicMock()
+            taker_agent.run_with_llm.return_value = TakerOutput(
+                opportunity_id=opp.id,
+                taker_score=30.0,
+                taker_confidence="medium",
+                risk_breakdown={
+                    "extraction_risk": 20.0,
+                    "gatekeeping_risk": 20.0,
+                    "false_authority_risk": 20.0,
+                    "dependency_risk": 20.0,
+                    "harm_risk": 20.0,
+                },
+                evidence_ids=[],
+                summary="Risk",
+            )
+            taker_agent.save_output.return_value = None
+
+            mediator = mock.MagicMock()
+            mediation = MediatorResult(
+                opportunity_id=opp.id,
+                verdict=Verdict.MANUAL_POC,
+                maker_score=75.0,
+                taker_score=30.0,
+                balance_summary="Balanced",
+                evidence_ids=[],
+                summary="Summary",
+            )
+            mediator.run_with_llm.return_value = mediation
+            mediator.save_output.return_value = None
+
+            cost = mock.MagicMock()
+            cost.run_with_llm.return_value = mock.MagicMock()
+            cost.save_output.return_value = None
+
+            with (
+                mock.patch("makeragents.orchestrator.MakerAgent", return_value=maker_agent),
+                mock.patch("makeragents.orchestrator.TakerAgent", return_value=taker_agent),
+                mock.patch("makeragents.orchestrator.MediatorAgent", return_value=mediator),
+                mock.patch("makeragents.orchestrator.CostCheckerAgent", return_value=cost),
+            ):
+                runner._process_one_opportunity(
+                    opp, evidence, run_dir, "Lodz", "senior"
+                )
+
+            # cost.json exists
+            cost_json = opp_dir / "cost.json"
+            assert cost_json.exists()
+            data = json.loads(cost_json.read_text())
+            assert "poc_type" in data
+            assert "cost_estimate_usd" in data
+            assert "time_estimate" in data
+            assert "risk_level" in data
+            assert "first_3_actions" in data
+
+            # cost.md exists
+            cost_md = opp_dir / "cost.md"
+            assert cost_md.exists()
+            assert "Cost Estimate" in cost_md.read_text()

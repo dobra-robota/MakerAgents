@@ -1,11 +1,9 @@
-"""Pipeline orchestrator: wires agents end-to-end via the PRD §6 topology.
-
-Research → Evidence → Opportunity
+"""Pipeline orchestrator for issue #74: Research → Evidence → Opportunity
   → Maker / Taker (parallel, per opportunity)
-    → Mediator → Cost Checker → Report
+    → Mediator → Cost Checker.
 
-Writes the complete PRD §15 folder layout for a run, including per-opportunity
-artifacts and ``status.yaml`` for resumability.
+This PR scopes the pipeline through the Cost Checker stage only.
+Report Agent is excluded per PRD build-order scope.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ from makeragents.agents.evidence import EvidenceAgent
 from makeragents.agents.maker import MakerAgent, MakerResult
 from makeragents.agents.mediator import MediatorAgent
 from makeragents.agents.opportunity import OpportunityAgent
-from makeragents.agents.report import ReportAgent
 from makeragents.agents.research import ResearchAgent
 from makeragents.agents.taker import TakerAgent, TakerOutput
 from makeragents.config import AppConfig, load_config
@@ -57,15 +54,10 @@ class PipelineRunner:
         run_dir: Path,
         metadata: RunMetadata,
     ) -> str:
-        """Execute the full pipeline and return the final report path.
+        """Execute pipeline through Cost Checker stage for each opportunity.
 
-        Args:
-            run_dir: Path to the run folder created by
-                :func:`~makeragents.run.create_run_folder`.
-            metadata: The run metadata (city, community, max_opportunities).
-
-        Returns:
-            The path to ``final-report.md`` as a string.
+        Returns the path to the existing final-report.md stub.
+        Report generation belongs to a later pipeline stage.
         """
         city = metadata.city
         community = metadata.community
@@ -113,12 +105,7 @@ class PipelineRunner:
                 "No opportunities derived — skipping per-opportunity steps"
             )
 
-        # 5. Report
-        logger.info("Step 7/7: Report — generating final report")
-        report = ReportAgent()
-        report_path = report.generate(run_dir)
-
-        return report_path
+        return str(run_dir / "final-report.md")
 
     # ------------------------------------------------------------------
     # Per-opportunity processing
