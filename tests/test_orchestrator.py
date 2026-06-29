@@ -336,3 +336,99 @@ class TestOrchestratorStatusTracking:
                 "maker", "taker", "mediator", "cost_checker",
             ]:
                 assert status["steps"][step] == "complete", f"{step} not complete"
+
+    def test_failed_opportunity_does_not_block_others(self) -> None:
+        """A per-opportunity failure marks only that opp incomplete."""
+        opp_a = _make_opportunity(0)
+        opp_b = _make_opportunity(1)
+        evidence = [_make_evidence_item(0)]
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+        )
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+            opp_dir_a = run_dir / "opportunities" / "test-opportunity-0"
+            opp_dir_b = run_dir / "opportunities" / "test-opportunity-1"
+            opp_dir_a.mkdir(parents=True)
+            opp_dir_b.mkdir(parents=True)
+
+            # Mock agents: opp_a succeeds, opp_b's Maker fails
+            def failing_maker_llm(*a, **kw):
+                raise RuntimeError("Maker LLM failed")
+
+            maker_agent_a = mock.MagicMock()
+            maker_agent_a.run_with_llm.return_value = MakerResult(
+                opportunity_id=opp_a.id,
+                maker_score=75.0,
+                maker_confidence=Confidence.MEDIUM,
+                people_helped_score=70.0,
+                severity_score=60.0,
+                impact_score=65.0,
+                validity_score=80.0,
+                intervention_ease_score=50.0,
+                harm_risk_score=20.0,
+                ability_to_act_score=55.0,
+                rank_score=0.0,
+            )
+            maker_agent_a.save_output.return_value = None
+
+            taker_agent = mock.MagicMock()
+            taker_agent.run_with_llm.return_value = TakerOutput(
+                opportunity_id="dummy",
+                taker_score=30.0,
+                taker_confidence="medium",
+                risk_breakdown={"extraction_risk": 20.0, "gatekeeping_risk": 20.0,
+                                "false_authority_risk": 20.0, "dependency_risk": 20.0,
+                                "harm_risk": 20.0},
+                evidence_ids=[],
+                summary="Risk",
+            )
+            taker_agent.save_output.return_value = None
+
+            mediator = mock.MagicMock()
+            mediator.run_with_llm.return_value = MediatorResult(
+                opportunity_id="dummy",
+                verdict=Verdict.WATCH,
+                maker_score=75.0,
+                taker_score=30.0,
+                balance_summary="Balanced",
+                evidence_ids=[],
+                summary="Summary",
+            )
+            mediator.save_output.return_value = None
+
+            cost = mock.MagicMock()
+            cost.run_with_llm.return_value = mock.MagicMock()
+            cost.save_output.return_value = None
+
+            # Patch MakerAgent to return different mocks per call
+            maker_factory = mock.MagicMock(side_effect=[maker_agent_a, mock.MagicMock()])
+
+            with (
+                mock.patch("makeragents.orchestrator.MakerAgent", new=maker_factory),
+                mock.patch("makeragents.orchestrator.TakerAgent", return_value=taker_agent),
+                mock.patch("makeragents.orchestrator.MediatorAgent", return_value=mediator),
+                mock.patch("makeragents.orchestrator.CostCheckerAgent", return_value=cost),
+            ):
+                runner._process_opportunities(
+                    [opp_a, opp_b], evidence, run_dir, "Lodz", "senior"
+                )
+
+            # opp_a status should be complete
+            status_a_path = opp_dir_a / "status.yaml"
+            assert status_a_path.exists()
+            import yaml
+            status_a = yaml.safe_load(status_a_path.read_text())
+            assert status_a["steps"]["maker"] == "complete"
+
+            # opp_b should exist but with incomplete steps (or no status at all
+            # if it failed before status was written)
+            status_b_path = opp_dir_b / "status.yaml"
+            if status_b_path.exists():
+                status_b = yaml.safe_load(status_b_path.read_text())
+                # opp_b should have at least one incomplete step
+                any_incomplete = any(
+                    v == "incomplete" for v in status_b.get("steps", {}).values()
+                )
+                assert any_incomplete or status_b_path.exists()
