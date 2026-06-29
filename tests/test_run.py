@@ -21,6 +21,8 @@ def test_build_run_metadata_timestamps_and_slugs_run_id() -> None:
     assert metadata.city == "Łodz"
     assert metadata.community == "senior citizens"
     assert metadata.max_opportunities == 5
+    assert metadata.queries_per_run == 10
+    assert metadata.results_per_query == 5
     assert metadata.run_id.endswith("-lodz-senior-citizens")
     # Timestamp prefix is YYYYMMDD-HHMMSS (15 chars) before the slug.
     prefix = metadata.run_id[:15]
@@ -29,7 +31,11 @@ def test_build_run_metadata_timestamps_and_slugs_run_id() -> None:
 
 def test_create_run_folder_writes_artifacts(tmp_path: Path) -> None:
     metadata = build_run_metadata(
-        city="Łodz", community="senior citizens", max_opportunities=3
+        city="Łodz",
+        community="senior citizens",
+        max_opportunities=3,
+        queries_per_run=8,
+        results_per_query=4,
     )
     run_dir = create_run_folder(metadata, base_dir=tmp_path)
 
@@ -47,6 +53,8 @@ def test_create_run_folder_writes_artifacts(tmp_path: Path) -> None:
     assert parsed["city"] == "Łodz"
     assert parsed["community"] == "senior citizens"
     assert parsed["max_opportunities"] == 3
+    assert parsed["queries_per_run"] == 8
+    assert parsed["results_per_query"] == 4
     assert parsed["timestamp"] == metadata.created_at.isoformat()
 
 

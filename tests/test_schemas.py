@@ -70,6 +70,8 @@ def test_schema_validation_accepts_core_run_artifacts() -> None:
     )
 
     assert run.max_opportunities == 5
+    assert run.queries_per_run == 10
+    assert run.results_per_query == 5
     assert evidence.source_url.unicode_string() == "https://lodz.example.gov/senior-services"
     assert scores.rank_score == 75.3
     assert opportunity.evidence_ids == ["EV-001"]
