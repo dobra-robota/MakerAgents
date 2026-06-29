@@ -12,6 +12,7 @@ import pytest
 from makeragents.agents.maker import MakerResult
 from makeragents.agents.mediator import MediatorResult
 from makeragents.agents.taker import TakerOutput
+from makeragents.agents.research import ResearchQueryResult, SearchResultsOutput
 from makeragents.config import AppConfig
 from makeragents.orchestrator import PipelineRunner
 from makeragents.run import build_run_metadata, create_run_folder
@@ -25,6 +26,7 @@ from makeragents.schemas import (
     SourceType,
     Verdict,
 )
+from makeragents.search.providers import SearchResult
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +70,117 @@ def _make_opportunity(idx: int) -> Opportunity:
 
 class TestOrchestratorTopology:
     """Verify the pipeline runs the correct sequence and writes artifacts."""
+
+    def test_mocked_search_run_writes_evidence_artifacts(self) -> None:
+        """Research results are flattened into persisted normalized evidence."""
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+            llm_client=mock.MagicMock(
+                chat_json=mock.MagicMock(return_value={"items": []})
+            ),
+        )
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        search_output = SearchResultsOutput(
+            query_results=[
+                ResearchQueryResult(
+                    query="official senior transit lodz",
+                    language="en",
+                    provider="mock",
+                    results_count=1,
+                    results=[
+                        SearchResult(
+                            title="Official transit report",
+                            url="https://city.gov/transit",
+                            snippet="Official report says 42% of seniors need transit help in 2025.",
+                        )
+                    ],
+                    raw={"query": 1},
+                ),
+                ResearchQueryResult(
+                    query="senior clinic news lodz",
+                    language="en",
+                    provider="mock",
+                    results_count=1,
+                    results=[
+                        SearchResult(
+                            title="Clinic access report",
+                            url="https://bbc.com/clinic-access",
+                            snippet="Reported by local news agency: clinic access remains difficult.",
+                        )
+                    ],
+                    raw={"query": 2},
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+
+            with (
+                mock.patch("makeragents.orchestrator.ResearchAgent") as mock_research,
+                mock.patch("makeragents.orchestrator.OpportunityAgent") as mock_opp,
+            ):
+                mock_research.return_value.search.return_value = search_output
+                mock_opp.return_value.process.return_value = []
+
+                runner.run(run_dir, metadata)
+
+            evidence_path = run_dir / "evidence" / "evidence.json"
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+        expected_prefix = metadata.run_id[:8]
+        assert [item["id"] for item in payload] == [
+            f"EVID-{expected_prefix}-0001",
+            f"EVID-{expected_prefix}-0002",
+        ]
+        assert payload[0] == {
+            "id": f"EVID-{expected_prefix}-0001",
+            "source_url": "https://city.gov/transit",
+            "source_domain": "city.gov",
+            "source_type": "government",
+            "evidence_type": "statistic",
+            "snippet": "Official report says 42% of seniors need transit help in 2025.",
+            "language": "en",
+            "claim_classification": "evidence_based",
+            "trust_score": 85.0,
+            "recency": "2025",
+            "confidence": "high",
+        }
+        assert payload[1]["source_url"] == "https://bbc.com/clinic-access"
+        assert payload[1]["source_domain"] == "bbc.com"
+        assert payload[1]["source_type"] == "major_news"
+        assert payload[1]["evidence_type"] == "news_report"
+        assert payload[1]["trust_score"] == 70.0
+
+    def test_zero_search_results_writes_empty_evidence_without_opportunities(
+        self,
+    ) -> None:
+        """Empty research output persists [] and does not invoke opportunities."""
+        runner = PipelineRunner(
+            config=AppConfig(deepseek_api_key="test-key"),
+            llm_client=mock.MagicMock(
+                chat_json=mock.MagicMock(return_value={"items": []})
+            ),
+        )
+        metadata = build_run_metadata(city="Lodz", community="senior")
+        search_output = SearchResultsOutput(query_results=[])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = create_run_folder(metadata, base_dir=Path(tmp))
+
+            with (
+                mock.patch("makeragents.orchestrator.ResearchAgent") as mock_research,
+                mock.patch("makeragents.orchestrator.OpportunityAgent") as mock_opp,
+            ):
+                mock_research.return_value.search.return_value = search_output
+
+                runner.run(run_dir, metadata)
+
+            evidence_path = run_dir / "evidence" / "evidence.json"
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+        assert payload == []
+        mock_opp.assert_not_called()
 
     def test_no_opportunities_still_produces_report(self) -> None:
         """When opportunity agent returns nothing, the report still runs."""
