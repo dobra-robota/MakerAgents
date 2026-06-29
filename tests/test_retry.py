@@ -10,6 +10,7 @@ import yaml
 from makeragents.retry import (
     PIPELINE_STEPS,
     STATUS_YAML_FILENAME,
+    RetryPrerequisiteError,
     get_incomplete_steps,
     load_opportunity_for_retry,
     mark_steps_complete,
@@ -336,13 +337,12 @@ class TestRunRetryStep:
         assert (opp_dir / "maker.json").is_file()
         assert (opp_dir / "maker.md").is_file()
 
-    def test_run_taker_step_requires_scores(self, tmp_path: Path) -> None:
+    def test_run_taker_step_requires_maker_artifact(self, tmp_path: Path) -> None:
         run_dir = _setup_retry_run(tmp_path, slug="test-opp")
         opp_dir = run_dir / "opportunities" / "test-opp"
         opportunity, evidence = load_opportunity_for_retry(opp_dir, run_dir)
 
-        # taker requires scores (from maker)
-        with pytest.raises(ValueError):
+        with pytest.raises(RetryPrerequisiteError, match="maker.json"):
             run_retry_step(
                 step="taker",
                 opportunity=opportunity,
@@ -454,6 +454,87 @@ class TestRetryCLI:
         assert (opp_dir / "maker.json").is_file()
         assert (opp_dir / "taker.json").is_file()
         assert (opp_dir / "mediator.json").is_file()
+
+
+    def test_retry_does_not_call_research_agent(self, tmp_path: Path) -> None:
+        run_dir = _setup_retry_run(
+            tmp_path,
+            slug="test-opp",
+            steps={
+                "research": "complete",
+                "evidence": "complete",
+                "opportunity": "complete",
+                "maker": "incomplete",
+                "taker": "complete",
+                "mediator": "complete",
+                "cost_checker": "complete",
+            },
+        )
+        with mock.patch(
+            "makeragents.agents.research.ResearchAgent.search",
+            side_effect=AssertionError("ResearchAgent must not run"),
+        ):
+            result = _invoke_in(
+                tmp_path,
+                "retry",
+                str(run_dir.relative_to(tmp_path)),
+                "--opportunity",
+                "test-opp",
+            )
+        assert result.exit_code == 0, result.output
+        status = read_status(run_dir / "opportunities" / "test-opp")
+        assert status["steps"]["maker"] == "complete"
+
+    def test_retry_errors_on_missing_evidence_artifact(self, tmp_path: Path) -> None:
+        run_dir = _setup_retry_run(
+            tmp_path,
+            slug="test-opp",
+            steps={
+                "research": "complete",
+                "evidence": "complete",
+                "opportunity": "complete",
+                "maker": "incomplete",
+                "taker": "complete",
+                "mediator": "complete",
+                "cost_checker": "complete",
+            },
+            with_evidence=False,
+        )
+        result = _invoke_in(
+            tmp_path,
+            "retry",
+            str(run_dir.relative_to(tmp_path)),
+            "--opportunity",
+            "test-opp",
+        )
+        assert result.exit_code == 1
+        assert "Cannot retry maker" in result.output
+        assert "evidence/evidence.json" in result.output
+
+    def test_retry_errors_on_missing_mediator_artifact(self, tmp_path: Path) -> None:
+        run_dir = _setup_retry_run(
+            tmp_path,
+            slug="test-opp",
+            steps={
+                "research": "complete",
+                "evidence": "complete",
+                "opportunity": "complete",
+                "maker": "complete",
+                "taker": "complete",
+                "mediator": "complete",
+                "cost_checker": "incomplete",
+            },
+        )
+        result = _invoke_in(
+            tmp_path,
+            "retry",
+            str(run_dir.relative_to(tmp_path)),
+            "--opportunity",
+            "test-opp",
+        )
+        assert result.exit_code == 1
+        assert "Cannot retry cost_checker" in result.output
+        assert "mediator.json" in result.output
 
     def test_retry_skips_when_all_complete(self, tmp_path: Path) -> None:
         run_dir = _setup_retry_run(

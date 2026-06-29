@@ -30,6 +30,10 @@ PIPELINE_STEPS: list[str] = [
 ]
 
 
+class RetryPrerequisiteError(RuntimeError):
+    """Raised when a retry step cannot be rebuilt from saved artifacts."""
+
+
 def read_status(opportunity_dir: Path) -> dict[str, Any]:
     """Read ``status.yaml`` from *opportunity_dir*.
 
@@ -67,9 +71,9 @@ def write_status(opportunity_dir: Path, status: dict[str, Any]) -> None:
 
 
 def get_incomplete_steps(status: dict[str, Any]) -> list[str]:
-    """Return pipeline step names whose recorded state is ``"incomplete"``."""
+    """Return incomplete pipeline steps in canonical pipeline order."""
     steps: dict[str, Any] = status.get("steps", {})
-    return [name for name, state in steps.items() if state == "incomplete"]
+    return [name for name in PIPELINE_STEPS if steps.get(name) == "incomplete"]
 
 
 def read_opportunity_state(opportunity_dir: Path) -> dict[str, Any]:
@@ -123,39 +127,51 @@ def load_opportunity_for_retry(
     if not opp_yaml.is_file():
         raise FileNotFoundError(f"opportunity.yaml not found in {opp_dir}")
 
-    opp_data = yaml.safe_load(opp_yaml.read_text(encoding="utf-8")) or {}
-    opportunity = Opportunity.model_validate(opp_data)
+    try:
+        opp_data = yaml.safe_load(opp_yaml.read_text(encoding="utf-8")) or {}
+        opportunity = Opportunity.model_validate(opp_data)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise RetryPrerequisiteError(
+            f"invalid prerequisite artifact {opp_yaml}: {exc}"
+        ) from exc
 
     # Load existing maker scores (for use by taker / mediator / cost_checker
     # when maker is already complete from a prior run).
     maker_file = opp_dir / "maker.json"
     if maker_file.is_file():
+        maker_data = _read_json_artifact(maker_file)
         try:
-            maker_data = json.loads(maker_file.read_text(encoding="utf-8"))
             opportunity = _apply_maker_scores(opportunity, maker_data)
-        except (json.JSONDecodeError, OSError, ValueError):
-            pass
+        except ValueError as exc:
+            raise RetryPrerequisiteError(
+                f"invalid prerequisite artifact {maker_file}: {exc}"
+            ) from exc
 
     # Load existing taker scores (for use by mediator / cost_checker).
     taker_file = opp_dir / "taker.json"
-    if taker_file.is_file() and opportunity.scores is not None:
+    if taker_file.is_file():
+        taker_data = _read_json_artifact(taker_file)
         try:
-            taker_data = json.loads(taker_file.read_text(encoding="utf-8"))
             opportunity = _apply_taker_scores(opportunity, taker_data)
-        except (json.JSONDecodeError, OSError, ValueError):
-            pass
+        except ValueError as exc:
+            raise RetryPrerequisiteError(
+                f"invalid prerequisite artifact {taker_file}: {exc}"
+            ) from exc
 
-    # Load evidence items.
+    # Load evidence items when the evidence artifact is available.  Step-level
+    # prerequisite checks decide whether the file is required for this retry.
     evidence_items: list[EvidenceItem] = []
     evidence_file = run_dir / "evidence" / "evidence.json"
     if evidence_file.is_file():
+        evidence_data = _read_json_artifact(evidence_file)
         try:
-            evidence_data = json.loads(evidence_file.read_text(encoding="utf-8"))
             evidence_items = [
                 EvidenceItem.model_validate(item) for item in evidence_data
             ]
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (TypeError, ValueError) as exc:
+            raise RetryPrerequisiteError(
+                f"invalid prerequisite artifact {evidence_file}: {exc}"
+            ) from exc
 
     return opportunity, evidence_items
 
@@ -173,26 +189,140 @@ def run_retry_step(
     The opportunity returned may have updated ``scores`` when *step* is
     ``"maker"`` or ``"taker"`` so that downstream agents can use them.
     """
-    slug = opp_dir.name
+    _validate_step_prerequisites(
+        step=step,
+        opportunity=opportunity,
+        evidence_items=evidence_items,
+        opp_dir=opp_dir,
+        run_dir=run_dir,
+    )
 
     if step == "maker":
-        return _run_maker_step(opportunity, evidence_items, run_dir)
+        return _run_maker_step(opportunity, evidence_items, opp_dir)
 
     if step == "taker":
-        return _run_taker_step(opportunity, evidence_items, slug, run_dir)
+        return _run_taker_step(opportunity, evidence_items, opp_dir)
 
     if step == "mediator":
-        _run_mediator_step(opportunity, run_dir)
+        _run_mediator_step(opportunity, opp_dir)
         return opportunity
 
     if step == "cost_checker":
-        _run_cost_checker_step(opportunity, run_dir)
+        _run_cost_checker_step(opportunity, opp_dir)
         return opportunity
 
     raise ValueError(f"Unknown retry step: {step}")
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _read_json_artifact(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RetryPrerequisiteError(
+            f"invalid prerequisite artifact {path}: {exc.msg}"
+        ) from exc
+    except OSError as exc:
+        raise RetryPrerequisiteError(
+            f"could not read prerequisite artifact {path}: {exc}"
+        ) from exc
+
+
+def _missing_prerequisite(
+    step: str, path: Path, reason: str
+) -> RetryPrerequisiteError:
+    return RetryPrerequisiteError(
+        f"Cannot retry {step}: missing prerequisite artifact {path} ({reason})."
+    )
+
+
+def _validate_step_prerequisites(
+    *,
+    step: str,
+    opportunity: Opportunity,
+    evidence_items: list[EvidenceItem],
+    opp_dir: Path,
+    run_dir: Path,
+) -> None:
+    evidence_file = run_dir / "evidence" / "evidence.json"
+
+    if step in {"maker", "taker"}:
+        if not evidence_file.is_file():
+            raise _missing_prerequisite(
+                step,
+                evidence_file,
+                "Evidence Agent output is required",
+            )
+        if opportunity.evidence_ids and not evidence_items:
+            raise RetryPrerequisiteError(
+                f"Cannot retry {step}: prerequisite artifact {evidence_file} "
+                "did not contain the opportunity's evidence items."
+            )
+
+    if step == "taker" and opportunity.scores is None:
+        raise _missing_prerequisite(
+            step,
+            opp_dir / "maker.json",
+            "Maker Agent output is required before Taker",
+        )
+
+    if step == "mediator":
+        missing = [
+            name
+            for name in ("maker.json", "taker.json")
+            if not (opp_dir / name).is_file()
+        ]
+        if missing:
+            raise _missing_prerequisite(
+                step,
+                opp_dir / missing[0],
+                "Maker and Taker outputs are required before Mediator",
+            )
+        if opportunity.scores is None:
+            raise RetryPrerequisiteError(
+                "Cannot retry mediator: maker/taker scores are unavailable; "
+                "check maker.json and taker.json."
+            )
+
+    if step == "cost_checker" and not (opp_dir / "mediator.json").is_file():
+        raise _missing_prerequisite(
+            step,
+            opp_dir / "mediator.json",
+            "Mediator output is required before Cost Checker",
+        )
+
+
+def _write_json(path: Path, data: Any) -> None:
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _write_maker_output(agent: MakerAgent, result: Any, opp_dir: Path) -> None:
+    opp_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(opp_dir / "maker.json", result.to_json_dict())
+    (opp_dir / "maker.md").write_text(agent._to_markdown(result), encoding="utf-8")
+
+
+def _write_taker_output(output: Any, opp_dir: Path) -> None:
+    opp_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(opp_dir / "taker.json", output.to_dict())
+    (opp_dir / "taker.md").write_text(output.to_markdown(), encoding="utf-8")
+
+
+def _write_mediator_output(agent: MediatorAgent, result: Any, opp_dir: Path) -> None:
+    opp_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(opp_dir / "mediator.json", result.model_dump(mode="json"))
+    (opp_dir / "mediator.md").write_text(agent._to_markdown(result), encoding="utf-8")
+
+
+def _write_cost_output(agent: CostCheckerAgent, estimate: Any, opp_dir: Path) -> None:
+    opp_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(opp_dir / "cost.json", estimate.to_dict())
+    (opp_dir / "cost.md").write_text(agent._to_markdown(estimate), encoding="utf-8")
 
 
 def _apply_maker_scores(
@@ -238,12 +368,12 @@ def _apply_taker_scores(
 def _run_maker_step(
     opportunity: Opportunity,
     evidence_items: list[EvidenceItem],
-    run_dir: Path,
+    opp_dir: Path,
 ) -> Opportunity:
     """Run the Maker Agent and return the opportunity with updated scores."""
     agent = MakerAgent()
     result = agent.run(opportunity, evidence_items)
-    agent.save_output(result, run_dir)
+    _write_maker_output(agent, result, opp_dir)
 
     scores = ScoreSet(
         validity_score=result.validity_score,
@@ -265,33 +395,32 @@ def _run_maker_step(
 def _run_taker_step(
     opportunity: Opportunity,
     evidence_items: list[EvidenceItem],
-    slug: str,
-    run_dir: Path,
+    opp_dir: Path,
 ) -> Opportunity:
     """Run the Taker Agent and return the opportunity with updated scores."""
     agent = TakerAgent()
     output, updated_opportunity = agent.analyze_and_update(
         opportunity, evidence_items
     )
-    TakerAgent.save_output(output, slug, run_dir)
+    _write_taker_output(output, opp_dir)
     return updated_opportunity
 
 
 def _run_mediator_step(
     opportunity: Opportunity,
-    run_dir: Path,
+    opp_dir: Path,
 ) -> None:
     """Run the Mediator Agent and persist its output."""
     agent = MediatorAgent()
     result = agent.run(opportunity)
-    agent.save_output(result, run_dir)
+    _write_mediator_output(agent, result, opp_dir)
 
 
 def _run_cost_checker_step(
     opportunity: Opportunity,
-    run_dir: Path,
+    opp_dir: Path,
 ) -> None:
     """Run the Cost Checker Agent and persist its output."""
     agent = CostCheckerAgent()
     estimate = agent.estimate(opportunity)
-    agent.write_artifacts(estimate, run_dir)
+    _write_cost_output(agent, estimate, opp_dir)
