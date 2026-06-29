@@ -73,6 +73,7 @@ def run(
         max_opportunities=max_opportunities,
     )
     run_dir = create_run_folder(metadata)
+    load_registry().persist_to_run(run_dir)
 
     # 3. Run the full pipeline.
     runner = PipelineRunner(config=config)

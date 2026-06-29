@@ -66,6 +66,10 @@ def test_run_command_creates_run_folder_and_invokes_pipeline(
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
     assert run_dir.name.endswith("-lodz-senior-citizens")
+    registry_path = run_dir / RUN_REGISTRY_RELATIVE_PATH
+    assert registry_path.is_file()
+    assert load_registry(registry_path).model_dump() == load_registry().model_dump()
+
 
     assert (run_dir / "final-report.md").is_file()
     parsed = yaml.safe_load((run_dir / "run.yaml").read_text(encoding="utf-8"))
